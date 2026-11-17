@@ -1,139 +1,47 @@
-name: Relay Cloud Deployment (Azure)
+name: Relay Cloud Deployment (Disabled Placeholder)
+
+# ==============================================================================
+# NOTICE: Automated Cloud Deployment via GitHub Actions is INTENTIONALLY DISABLED.
+#
+# Single Authoritative Deployment Path:
+# All Azure provisioning, bootstrapping, schema migration, and revision rollout
+# operations must be performed using the reviewed local deployment orchestrator:
+#   ./deploy/scripts/deploy.sh <env> <region>
+#
+# This workflow cannot provision or alter Azure cloud resources:
+# - Zero id-token or write permissions
+# - Zero Azure login or secret access
+# - Zero cloud resource provisioning or container builds
+# ==============================================================================
 
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Target Deployment Environment'
-        required: true
-        default: 'demo'
-        type: choice
-        options:
-          - demo
-          - prod
-      confirm_deployment:
-        description: 'Type "DEPLOY" to confirm provisioning'
-        required: true
+      notice:
+        description: 'Notice of Disabled State'
+        required: false
+        default: 'Cloud deployment via GitHub Actions is disabled. Use deploy.sh instead.'
 
 permissions:
-  id-token: write
   contents: read
 
 jobs:
-  deploy:
-    name: Deploy to Azure (${{ github.event.inputs.environment }})
+  disabled_notice:
+    name: Cloud Deployment Disabled
     runs-on: ubuntu-latest
-    environment: ${{ github.event.inputs.environment }}
 
     steps:
-      - name: Validate Confirmation
+      - name: Print Authoritative Deployment Path Notice
         run: |
-          if [ "${{ github.event.inputs.confirm_deployment }}" != "DEPLOY" ]; then
-            echo "Deployment aborted: Confirmation string did not match 'DEPLOY'"
-            exit 1
-          fi
-
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Azure Login via OIDC
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Build React Frontend
-        working-directory: frontend/relay-dashboard
-        run: |
-          npm ci
-          npm run build
-
-      - name: Azure CLI What-If Preview
-        run: |
-          az deployment group what-if \
-            --resource-group rg-relay-${{ github.event.inputs.environment }} \
-            --template-file deploy/main.bicep \
-            --parameters deploy/parameters/${{ github.event.inputs.environment }}.bicepparam
-
-      - name: Provision Azure Infrastructure via Bicep
-        id: bicep_deploy
-        run: |
-          OUTPUTS=$(az deployment group create \
-            --resource-group rg-relay-${{ github.event.inputs.environment }} \
-            --template-file deploy/main.bicep \
-            --parameters deploy/parameters/${{ github.event.inputs.environment }}.bicepparam \
-            --query properties.outputs)
-          
-          echo "ACR_SERVER=$(echo $OUTPUTS | jq -r .acrLoginServer.value)" >> $GITHUB_ENV
-          echo "API_URL=$(echo $OUTPUTS | jq -r .apiUrl.value)" >> $GITHUB_ENV
-          echo "SQL_SERVER=$(echo $OUTPUTS | jq -r .sqlServerFqdn.value)" >> $GITHUB_ENV
-          echo "SQL_DB=$(echo $OUTPUTS | jq -r .sqlDatabaseName.value)" >> $GITHUB_ENV
-          echo "FRONTEND_ENDPOINT=$(echo $OUTPUTS | jq -r .frontendWebEndpoint.value)" >> $GITHUB_ENV
-
-      - name: Build and Push Container Images to ACR
-        run: |
-          az acr login --name $ACR_SERVER
-          
-          IMAGE_TAG=${{ github.sha }}
-          
-          docker build -f src/Relay.Api/Dockerfile -t $ACR_SERVER/relay-api:$IMAGE_TAG .
-          docker build -f src/Relay.Worker/Dockerfile -t $ACR_SERVER/relay-worker:$IMAGE_TAG .
-          docker build -f src/Relay.Admin/Dockerfile -t $ACR_SERVER/relay-admin:$IMAGE_TAG .
-          
-          docker push $ACR_SERVER/relay-api:$IMAGE_TAG
-          docker push $ACR_SERVER/relay-worker:$IMAGE_TAG
-          docker push $ACR_SERVER/relay-admin:$IMAGE_TAG
-
-      - name: Execute Controlled Database Migration
-        env:
-          ConnectionStrings__RelayDatabase: "Server=tcp:${{ env.SQL_SERVER }},1433;Database=${{ env.SQL_DB }};Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;"
-        run: |
-          echo "Running database migration bundle via relay-admin CLI..."
-          dotnet run --project src/Relay.Admin/Relay.Admin.csproj -- migrate
-
-      - name: Deploy Container Apps Revisions
-        run: |
-          az containerapp update \
-            --name ca-relay-api \
-            --resource-group rg-relay-${{ github.event.inputs.environment }} \
-            --image $ACR_SERVER/relay-api:${{ github.sha }}
-          
-          az containerapp update \
-            --name ca-relay-worker \
-            --resource-group rg-relay-${{ github.event.inputs.environment }} \
-            --image $ACR_SERVER/relay-worker:${{ github.sha }}
-
-      - name: Publish Frontend Static Assets to Azure Storage $web
-        run: |
-          STORAGE_ACCOUNT=$(az storage account list --resource-group rg-relay-${{ github.event.inputs.environment }} --query "[?starts_with(name, 'strelayweb')].name" -o tsv)
-          az storage blob upload-batch \
-            --account-name $STORAGE_ACCOUNT \
-            --auth-mode login \
-            --destination '$web' \
-            --source frontend/relay-dashboard/dist \
-            --overwrite
-
-      - name: Verify Health Probes
-        run: |
-          echo "Verifying API Liveness probe at $API_URL/health/live..."
-          curl -fsSL "$API_URL/health/live"
-          
-          echo "Verifying API Readiness probe at $API_URL/health/ready..."
-          curl -fsSL "$API_URL/health/ready"
-          
-          echo "================================================================="
-          echo "DEPLOYMENT COMPLETE!"
-          echo "API URL: $API_URL"
-          echo "Frontend Dashboard: $FRONTEND_ENDPOINT"
-          echo "================================================================="
+          echo "================================================================================"
+          echo "NOTICE: CLOUD DEPLOYMENT VIA GITHUB ACTIONS IS INTENTIONALLY DISABLED"
+          echo "================================================================================"
+          echo "Automated CI/CD deployment through GitHub Actions has been disabled to prevent"
+          echo "accidental provisioning and dual deployment discrepancies."
+          echo ""
+          echo "The SINGLE AUTHORITATIVE deployment mechanism is the local orchestrator:"
+          echo "  ./deploy/scripts/deploy.sh <environment> <region>"
+          echo ""
+          echo "Refer to docs/deployment/azure-deployment.md for the authoritative runbook."
+          echo "================================================================================"
+          exit 1

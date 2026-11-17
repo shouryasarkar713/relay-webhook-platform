@@ -56,7 +56,8 @@ resource migrationJob 'Microsoft.App/jobs@2024-03-01' = {
           name: 'relay-migration'
           image: migrationImage
           command: [
-            './relay-admin'
+            'dotnet'
+            'relay-admin.dll'
             'migrate'
           ]
           env: [

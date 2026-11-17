@@ -2,134 +2,317 @@
 set -euo pipefail
 
 # ==============================================================================
-# Relay End-to-End Production Smoke Test Suite (10-Phase Verification)
+# Relay End-to-End Production Smoke Test Suite (Acceptance Verification)
+# ==============================================================================
+# Invariants:
+# 1. Requires explicit RELAY_SMOKE_API_KEY; never uses fake/default fallback keys.
+# 2. Never prints, logs, or persists the API key or its prefix.
+# 3. Uses finite connection (10s) and request (30s) timeouts on all HTTP calls.
+# 4. Validates HTTP status codes and JSON payloads before asserting properties.
+# 5. Distinguishes PASS, FAIL, and SKIPPED tests.
+# 6. Exits nonzero if any mandatory acceptance test fails.
 # ==============================================================================
 
 API_BASE_URL="${1:-http://localhost:5000}"
 RECEIVER_URL="${2:-https://httpbin.org/post}"
 
+# Strip trailing slashes
+API_BASE_URL="${API_BASE_URL%/}"
+
 echo "=============================================================================="
-echo "RELAY PRODUCTION SMOKE TEST SUITE"
+echo "RELAY PRODUCTION SMOKE ACCEPTANCE SUITE"
 echo "Target API:      ${API_BASE_URL}"
 echo "Target Receiver: ${RECEIVER_URL}"
 echo "=============================================================================="
 
-# Test 1: API Availability
-echo "[TEST 1/10] Verifying API Liveness & Readiness Probes..."
-LIVE_RESP=$(curl -sSL "${API_BASE_URL}/health/live")
-echo "  /health/live:  ${LIVE_RESP}"
-READY_RESP=$(curl -sSL "${API_BASE_URL}/health/ready")
-echo "  /health/ready: ${READY_RESP}"
-
-# Test 2: Tenant Provisioning via relay-admin
-echo "[TEST 2/10] Provisioning Tenant and Cryptographic API Key via relay-admin..."
-MOCK_TENANT_ID="11111111-1111-1111-1111-111111111111"
-API_KEY="${RELAY_SMOKE_API_KEY:-rl_live_pk_test_a_1111111122222222333333334444444455555555666666667777777788888888}"
-echo "  Using authenticated API Key: ${API_KEY:0:20}..."
-
-# Test 3: Event Ingestion (POST /v1/events)
-echo "[TEST 3/10] Submitting Event via POST /v1/events..."
-IDEM_KEY="smoke-idem-$(date +%s)"
-INGEST_RESP=$(curl -sSL -X POST "${API_BASE_URL}/v1/events" \
-    -H "X-Api-Key: ${API_KEY}" \
-    -H "Idempotency-Key: ${IDEM_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "eventType": "invoice.paid",
-        "payload": {
-            "invoiceNumber": "INV-SMOKE-001",
-            "amount": 1499.00,
-            "currency": "USD"
-        }
-    }')
-echo "  Ingest Response: ${INGEST_RESP}"
-EVENT_ID=$(echo "${INGEST_RESP}" | jq -r .eventId)
-
-# Test 4: Idempotency Protection
-echo "[TEST 4/10] Verifying Duplicate Request Idempotency..."
-DUP_RESP=$(curl -sSL -X POST "${API_BASE_URL}/v1/events" \
-    -H "X-Api-Key: ${API_KEY}" \
-    -H "Idempotency-Key: ${IDEM_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "eventType": "invoice.paid",
-        "payload": {
-            "invoiceNumber": "INV-SMOKE-001",
-            "amount": 1499.00,
-            "currency": "USD"
-        }
-    }')
-DUP_ID=$(echo "${DUP_RESP}" | jq -r .eventId)
-if [ "${EVENT_ID}" == "${DUP_ID}" ]; then
-    echo "  SUCCESS: Duplicate submission returned identical EventId: ${DUP_ID}"
-else
-    echo "  FAIL: Idempotency failed! Original=${EVENT_ID}, Duplicate=${DUP_ID}"
+# 1. Enforce API Key Presence
+if [ -z "${RELAY_SMOKE_API_KEY:-}" ]; then
+    echo "ERROR: RELAY_SMOKE_API_KEY environment variable is required but not set."
+    echo ""
+    echo "To generate a tenant and authenticated API key before running smoke tests:"
+    echo "  dotnet run --project src/Relay.Admin/Relay.Admin.csproj -- tenant create --name 'Smoke Tenant'"
+    echo "  dotnet run --project src/Relay.Admin/Relay.Admin.csproj -- apikey create --tenant-id <TENANT_ID> --name 'Smoke Key'"
+    echo "Then export the plain-text key:"
+    echo "  export RELAY_SMOKE_API_KEY='rl_live_...'"
     exit 1
 fi
 
-# Test 5 & 6: Endpoint Registration & Fan-out
-echo "[TEST 5/10] Registering Webhook Endpoint..."
-EP_RESP=$(curl -sSL -X POST "${API_BASE_URL}/v1/endpoints" \
-    -H "X-Api-Key: ${API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "name": "Smoke Test Destination",
-        "url": "'"${RECEIVER_URL}"'",
-        "subscribedEventTypes": ["invoice.paid"]
-    }')
-ENDPOINT_ID=$(echo "${EP_RESP}" | jq -r .id)
-echo "  Registered Endpoint: ${ENDPOINT_ID}"
+CURL_TIMEOUTS=(--connect-timeout 10 --max-time 30)
 
-# Test 7: HTTP Delivery Verification
-echo "[TEST 6/10] Submitting New Event for Webhook Dispatch..."
-DELIV_EVENT_IDEM="smoke-dispatch-$(date +%s)"
-EVENT_2_RESP=$(curl -sSL -X POST "${API_BASE_URL}/v1/events" \
-    -H "X-Api-Key: ${API_KEY}" \
-    -H "Idempotency-Key: ${DELIV_EVENT_IDEM}" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "eventType": "invoice.paid",
-        "payload": {
-            "status": "completed",
-            "testRun": true
-        }
-    }')
-EVENT_2_ID=$(echo "${EVENT_2_RESP}" | jq -r .eventId)
-echo "  Ingested Event 2: ${EVENT_2_ID}"
+# Tracking counters
+TESTS_TOTAL=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+TESTS_SKIPPED=0
+declare -a TEST_RESULTS=()
 
-echo "  Waiting 5 seconds for Outbox Dispatcher and Fan-out processing..."
-sleep 5
+record_result() {
+    local name="$1"
+    local status="$2"
+    local detail="${3:-}"
+    TESTS_TOTAL=$((TESTS_TOTAL + 1))
+    if [ "$status" = "PASS" ]; then
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        TEST_RESULTS+=("  [PASS]    ${name}")
+        echo "  --> RESULT: PASS"
+    elif [ "$status" = "SKIPPED" ]; then
+        TESTS_SKIPPED=$((TESTS_SKIPPED + 1))
+        TEST_RESULTS+=("  [SKIPPED] ${name} (${detail})")
+        echo "  --> RESULT: SKIPPED (${detail})"
+    else
+        TESTS_FAILED=$((TESTS_FAILED + 1))
+        TEST_RESULTS+=("  [FAIL]    ${name} (${detail})")
+        echo "  --> RESULT: FAIL (${detail})"
+    fi
+    echo ""
+}
 
-# Test 8: Query Delivery History
-echo "[TEST 7/10] Inspecting Webhook Delivery History via GET /v1/deliveries..."
-DELIVERIES_RESP=$(curl -sSL -X GET "${API_BASE_URL}/v1/deliveries" \
-    -H "X-Api-Key: ${API_KEY}")
-DELIVERY_COUNT=$(echo "${DELIVERIES_RESP}" | jq '.items | length')
-echo "  Active Deliveries found: ${DELIVERY_COUNT}"
+# Helper: execute curl, return body in $RESP_BODY, http code in $HTTP_CODE
+http_request() {
+    local method="$1"
+    local url="$2"
+    shift 2
+    local extra_args=("$@")
 
-# Test 9: Dead-Letter & Manual Replay Verification
-echo "[TEST 8/10] Testing Replay Idempotency Endpoint..."
-FIRST_DELIVERY_ID=$(echo "${DELIVERIES_RESP}" | jq -r '.items[0].id // empty')
-if [ -n "${FIRST_DELIVERY_ID}" ]; then
-    echo "  Target Delivery for Replay Test: ${FIRST_DELIVERY_ID}"
-    REPLAY_RESP=$(curl -sSL -X POST "${API_BASE_URL}/v1/deliveries/${FIRST_DELIVERY_ID}/replay" \
-        -H "X-Api-Key: ${API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d '{"replayKey": "smoke-replay-001"}' || true)
-    echo "  Replay Response: ${REPLAY_RESP}"
+    local raw_output
+    if ! raw_output=$(curl -sS "${CURL_TIMEOUTS[@]}" -w "\n%{http_code}" -X "$method" "$url" "${extra_args[@]}"); then
+        HTTP_CODE="000"
+        RESP_BODY=""
+        return 1
+    fi
+
+    HTTP_CODE=$(echo "$raw_output" | tail -n 1)
+    RESP_BODY=$(echo "$raw_output" | sed '$d')
+    return 0
+}
+
+# ------------------------------------------------------------------------------
+# Test 1: API Availability & Health Probes
+# ------------------------------------------------------------------------------
+echo "[TEST 1] Verifying API Liveness & Readiness Probes..."
+TEST_1_NAME="API Liveness & Readiness Probes"
+if http_request GET "${API_BASE_URL}/health/live" && [ "${HTTP_CODE}" = "200" ]; then
+    LIVE_OK=true
+else
+    LIVE_OK=false
 fi
 
-# Test 10: Observability Verification
-echo "[TEST 9/10] Verifying Event Query Endpoint GET /v1/events/${EVENT_ID}..."
-GET_EVENT_RESP=$(curl -sSL -X GET "${API_BASE_URL}/v1/events/${EVENT_ID}" \
-    -H "X-Api-Key: ${API_KEY}")
-EVENT_STATUS=$(echo "${GET_EVENT_RESP}" | jq -r .status)
-echo "  Event Status in Database: ${EVENT_STATUS}"
+if http_request GET "${API_BASE_URL}/health/ready" && [ "${HTTP_CODE}" = "200" ]; then
+    READY_OK=true
+else
+    READY_OK=false
+fi
 
-echo "[TEST 10/10] Verifying Health Status Summary..."
-echo "  Liveness:  $(echo "${LIVE_RESP}" | jq -r .status)"
-echo "  Readiness: $(echo "${READY_RESP}" | jq -r .status)"
+if [ "${LIVE_OK}" = true ] && [ "${READY_OK}" = true ]; then
+    record_result "${TEST_1_NAME}" "PASS"
+else
+    record_result "${TEST_1_NAME}" "FAIL" "Liveness HTTP=${LIVE_OK}, Readiness HTTP=${READY_OK}"
+fi
 
+# ------------------------------------------------------------------------------
+# Test 2: Event Ingestion (POST /v1/events)
+# ------------------------------------------------------------------------------
+echo "[TEST 2] Submitting Event via POST /v1/events..."
+TEST_2_NAME="Authenticated Event Ingestion (POST /v1/events)"
+IDEM_KEY_1="smoke-idem-$(date +%s)-$RANDOM"
+EVENT_PAYLOAD='{"eventType":"smoke.invoice.paid","payload":{"invoiceNumber":"INV-SMOKE-001","amount":99.50,"currency":"USD"}}'
+
+if http_request POST "${API_BASE_URL}/v1/events" \
+    -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" \
+    -H "Idempotency-Key: ${IDEM_KEY_1}" \
+    -H "Content-Type: application/json" \
+    -d "${EVENT_PAYLOAD}" && [ "${HTTP_CODE}" = "202" ]; then
+    
+    EVENT_ID_1=$(echo "${RESP_BODY}" | jq -r .eventId 2>/dev/null || echo "")
+    if [ -n "${EVENT_ID_1}" ] && [ "${EVENT_ID_1}" != "null" ]; then
+        echo "  Ingested Event ID: ${EVENT_ID_1}"
+        record_result "${TEST_2_NAME}" "PASS"
+    else
+        record_result "${TEST_2_NAME}" "FAIL" "HTTP 202 returned but eventId missing from JSON body"
+    fi
+else
+    record_result "${TEST_2_NAME}" "FAIL" "Expected HTTP 202, got HTTP ${HTTP_CODE}"
+fi
+
+# ------------------------------------------------------------------------------
+# Test 3: Idempotency Protection
+# ------------------------------------------------------------------------------
+echo "[TEST 3] Verifying Duplicate Request Idempotency..."
+TEST_3_NAME="Duplicate Request Idempotency Enforcement"
+if [ -n "${EVENT_ID_1:-}" ] && [ "${EVENT_ID_1}" != "null" ]; then
+    if http_request POST "${API_BASE_URL}/v1/events" \
+        -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" \
+        -H "Idempotency-Key: ${IDEM_KEY_1}" \
+        -H "Content-Type: application/json" \
+        -d "${EVENT_PAYLOAD}" && [ "${HTTP_CODE}" = "202" ]; then
+        
+        DUP_EVENT_ID=$(echo "${RESP_BODY}" | jq -r .eventId 2>/dev/null || echo "")
+        if [ "${EVENT_ID_1}" = "${DUP_EVENT_ID}" ]; then
+            echo "  Idempotency Verified: Duplicate submission returned identical EventId: ${DUP_EVENT_ID}"
+            record_result "${TEST_3_NAME}" "PASS"
+        else
+            record_result "${TEST_3_NAME}" "FAIL" "Original ID (${EVENT_ID_1}) != Duplicate ID (${DUP_EVENT_ID})"
+        fi
+    else
+        record_result "${TEST_3_NAME}" "FAIL" "Expected HTTP 202 on duplicate submission, got HTTP ${HTTP_CODE}"
+    fi
+else
+    record_result "${TEST_3_NAME}" "FAIL" "Prerequisite Test 2 failed; cannot test duplicate submission"
+fi
+
+# ------------------------------------------------------------------------------
+# Test 4: Webhook Endpoint Registration (POST /v1/endpoints)
+# ------------------------------------------------------------------------------
+echo "[TEST 4] Registering Webhook Destination Endpoint..."
+TEST_4_NAME="Webhook Endpoint Registration (POST /v1/endpoints)"
+ENDPOINT_PAYLOAD=$(jq -n \
+    --arg name "Smoke Acceptance Receiver ($RANDOM)" \
+    --arg url "${RECEIVER_URL}" \
+    '{name: $name, url: $url, subscribedEventTypes: ["smoke.dispatch.test"]}')
+
+if http_request POST "${API_BASE_URL}/v1/endpoints" \
+    -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "${ENDPOINT_PAYLOAD}" && [ "${HTTP_CODE}" = "201" ]; then
+    
+    ENDPOINT_ID=$(echo "${RESP_BODY}" | jq -r .id 2>/dev/null || echo "")
+    if [ -n "${ENDPOINT_ID}" ] && [ "${ENDPOINT_ID}" != "null" ]; then
+        echo "  Registered Endpoint ID: ${ENDPOINT_ID}"
+        record_result "${TEST_4_NAME}" "PASS"
+    else
+        record_result "${TEST_4_NAME}" "FAIL" "HTTP 201 returned but endpoint id missing from JSON body"
+    fi
+else
+    record_result "${TEST_4_NAME}" "FAIL" "Expected HTTP 201, got HTTP ${HTTP_CODE}"
+fi
+
+# ------------------------------------------------------------------------------
+# Test 5: End-to-End Fan-out & Delivery Verification
+# ------------------------------------------------------------------------------
+echo "[TEST 5] Submitting Matching Event & Polling Delivery Dispatch..."
+TEST_5_NAME="End-to-End Outbox Fan-out & Delivery Record"
+if [ -n "${ENDPOINT_ID:-}" ] && [ "${ENDPOINT_ID}" != "null" ]; then
+    IDEM_KEY_2="smoke-dispatch-$(date +%s)-$RANDOM"
+    DISPATCH_PAYLOAD='{"eventType":"smoke.dispatch.test","payload":{"action":"verify_delivery","timestamp":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}}'
+
+    if http_request POST "${API_BASE_URL}/v1/events" \
+        -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" \
+        -H "Idempotency-Key: ${IDEM_KEY_2}" \
+        -H "Content-Type: application/json" \
+        -d "${DISPATCH_PAYLOAD}" && [ "${HTTP_CODE}" = "202" ]; then
+        
+        EVENT_ID_2=$(echo "${RESP_BODY}" | jq -r .eventId 2>/dev/null || echo "")
+        echo "  Ingested Matching Event ID: ${EVENT_ID_2}"
+        echo "  Polling /v1/deliveries for endpoint ${ENDPOINT_ID} (bounded timeout: 30s)..."
+
+        DELIVERY_FOUND=false
+        for i in $(seq 1 6); do
+            sleep 5
+            if http_request GET "${API_BASE_URL}/v1/deliveries?endpointId=${ENDPOINT_ID}" \
+                -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" && [ "${HTTP_CODE}" = "200" ]; then
+                
+                COUNT=$(echo "${RESP_BODY}" | jq '.items | length' 2>/dev/null || echo "0")
+                if [ "${COUNT}" -ge 1 ]; then
+                    DELIVERY_STATUS=$(echo "${RESP_BODY}" | jq -r '.items[0].status' 2>/dev/null || echo "Unknown")
+                    DELIVERY_ID=$(echo "${RESP_BODY}" | jq -r '.items[0].id' 2>/dev/null || echo "")
+                    echo "  Found delivery record ${DELIVERY_ID} with status: ${DELIVERY_STATUS} (poll ${i}/6)"
+                    DELIVERY_FOUND=true
+                    break
+                fi
+            fi
+            echo "  Waiting for background worker dispatch... (${i}/6)"
+        done
+
+        if [ "${DELIVERY_FOUND}" = true ]; then
+            record_result "${TEST_5_NAME}" "PASS"
+        else
+            record_result "${TEST_5_NAME}" "FAIL" "Delivery record was not created within 30-second window"
+        fi
+    else
+        record_result "${TEST_5_NAME}" "FAIL" "Failed to ingest matching event (HTTP ${HTTP_CODE})"
+    fi
+else
+    record_result "${TEST_5_NAME}" "FAIL" "Prerequisite Test 4 failed; no endpoint available for dispatch test"
+fi
+
+# ------------------------------------------------------------------------------
+# Test 6: Event Query Verification (GET /v1/events/{id})
+# ------------------------------------------------------------------------------
+echo "[TEST 6] Querying Event Status via GET /v1/events/{id}..."
+TEST_6_NAME="Single Event Query (GET /v1/events/{id})"
+TARGET_QUERY_ID="${EVENT_ID_1:-${EVENT_ID_2:-}}"
+if [ -n "${TARGET_QUERY_ID}" ]; then
+    if http_request GET "${API_BASE_URL}/v1/events/${TARGET_QUERY_ID}" \
+        -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" && [ "${HTTP_CODE}" = "200" ]; then
+        
+        RETRIEVED_STATUS=$(echo "${RESP_BODY}" | jq -r .status 2>/dev/null || echo "")
+        echo "  Retrieved Event Status: ${RETRIEVED_STATUS}"
+        record_result "${TEST_6_NAME}" "PASS"
+    else
+        record_result "${TEST_6_NAME}" "FAIL" "Expected HTTP 200, got HTTP ${HTTP_CODE}"
+    fi
+else
+    record_result "${TEST_6_NAME}" "FAIL" "No EventId available to query"
+fi
+
+# ------------------------------------------------------------------------------
+# Test 7: Dead-Letter Replay Verification (Explicitly Optional Scenario)
+# ------------------------------------------------------------------------------
+echo "[TEST 7] Evaluating Dead-Letter Replay Eligibility..."
+TEST_7_NAME="Manual Dead-Letter Replay & Replay Idempotency"
+if http_request GET "${API_BASE_URL}/v1/deliveries?status=DeadLettered" \
+    -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" && [ "${HTTP_CODE}" = "200" ]; then
+    
+    DEAD_LETTER_COUNT=$(echo "${RESP_BODY}" | jq '.items | length' 2>/dev/null || echo "0")
+    if [ "${DEAD_LETTER_COUNT}" -ge 1 ]; then
+        TARGET_DL_ID=$(echo "${RESP_BODY}" | jq -r '.items[0].id')
+        echo "  Found eligible DeadLettered delivery: ${TARGET_DL_ID}"
+        REPLAY_IDEM_KEY="smoke-replay-$(date +%s)"
+
+        if http_request POST "${API_BASE_URL}/v1/deliveries/${TARGET_DL_ID}/replay" \
+            -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" \
+            -H "Idempotency-Key: ${REPLAY_IDEM_KEY}" \
+            -H "Content-Type: application/json" && [ "${HTTP_CODE}" = "202" ]; then
+            
+            # Verify replay idempotency with identical key
+            if http_request POST "${API_BASE_URL}/v1/deliveries/${TARGET_DL_ID}/replay" \
+                -H "X-Api-Key: ${RELAY_SMOKE_API_KEY}" \
+                -H "Idempotency-Key: ${REPLAY_IDEM_KEY}" \
+                -H "Content-Type: application/json" && [ "${HTTP_CODE}" = "202" ]; then
+                record_result "${TEST_7_NAME}" "PASS"
+            else
+                record_result "${TEST_7_NAME}" "FAIL" "Replay idempotency request returned HTTP ${HTTP_CODE}"
+            fi
+        else
+            record_result "${TEST_7_NAME}" "FAIL" "Replay request returned HTTP ${HTTP_CODE}"
+        fi
+    else
+        record_result "${TEST_7_NAME}" "SKIPPED" "No DeadLettered deliveries found in environment; prerequisite not met"
+    fi
+else
+    record_result "${TEST_7_NAME}" "FAIL" "Failed to query deliveries for DeadLettered records (HTTP ${HTTP_CODE})"
+fi
+
+# ==============================================================================
+# Final Acceptance Summary
+# ==============================================================================
 echo "=============================================================================="
-echo "ALL SMOKE TESTS EXECUTED SUCCESSFULLY!"
+echo "SMOKE ACCEPTANCE SUITE SUMMARY"
 echo "=============================================================================="
+for line in "${TEST_RESULTS[@]}"; do
+    echo "$line"
+done
+echo "------------------------------------------------------------------------------"
+echo "Total Tests:   ${TESTS_TOTAL}"
+echo "Passed:        ${TESTS_PASSED}"
+echo "Skipped:       ${TESTS_SKIPPED}"
+echo "Failed:        ${TESTS_FAILED}"
+echo "=============================================================================="
+
+if [ "${TESTS_FAILED}" -gt 0 ]; then
+    echo "ERROR: One or more mandatory acceptance tests failed."
+    exit 1
+else
+    echo "ALL MANDATORY SMOKE TESTS COMPLETED SUCCESSFULLY!"
+    exit 0
+fi

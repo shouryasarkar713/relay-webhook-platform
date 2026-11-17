@@ -81,7 +81,7 @@ All figures reflect Central India region list pricing (exclusive of applicable l
 ---
 
 ### Scenario C — Intermittent 10-Hour Evaluation Session (Recommended FinOps Policy)
-*Assumes the platform is provisioned for a 10-hour evaluation session and immediately torn down using `teardown.sh`:*
+*Assumes the platform is provisioned for a 10-hour evaluation session and immediately torn down using `teardown.sh` (assuming no other workloads have consumed the subscription's monthly free grant):*
 
 | Resource Component | Duration / Billing Basis | Session Cost (USD) | Session Cost (INR) |
 | :--- | :--- | :---: | :---: |
@@ -94,11 +94,32 @@ All figures reflect Central India region list pricing (exclusive of applicable l
 
 ---
 
+### Scenario D — API Scale-Up Boundary (Sustained Ingestion Load)
+*Evaluates financial impact when `ca-relay-api` autoscales from 1 replica to its maximum limit of 3 replicas under high burst traffic (while `ca-relay-worker` remains at 1 replica):*
+
+- **Maximum Scale Allocation**:
+  - API Replicas: 3 × (0.5 vCPU, 1.0 GiB) = 1.5 vCPU and 3.0 GiB RAM.
+  - Worker Replicas: 1 × (0.5 vCPU, 1.0 GiB) = 0.5 vCPU and 1.0 GiB RAM.
+  - Total Scaled Allocation: **2.0 vCPU and 4.0 GiB RAM**.
+- **Scaled Hourly Compute Rate**:
+  - vCPU: 2.0 × $0.0864 = $0.1728 / hr
+  - Memory: 4.0 × $0.0216 = $0.0864 / hr
+  - Total Scaled Compute: **$0.2592 / hour** (~₹21.60 INR / hr).
+- **Burst Financial Impact**:
+  - A 4-hour high-volume stress evaluation at maximum 3-replica scale adds only **~$1.04 USD** (~₹86 INR).
+  - Continuous 24/7 execution at maximum scale for 30 days (unrealistic for a demo): ~$181.22 / month (compute only).
+
+---
+
 ## 4. Key FinOps Guidelines & Cost Guards
 
-1. **Deterministic Teardown**:
+1. **Baseline Minimum Invariant**:
+   - The default configuration provisions exactly 1 API replica and 1 Worker replica. All baseline estimates assume these minimums unless load triggers scaling.
+2. **Shared Subscription Free Grants**:
+   - Container Apps monthly free grants (180,000 vCPU-seconds and 360,000 GiB-seconds) and Log Analytics free grants (5 GB/month) are shared globally across the entire Azure subscription.
+3. **Deterministic Teardown**:
    - Utilize `./deploy/scripts/teardown.sh demo --confirm-delete-all-resources` directly following portfolio reviews to avoid unintended idle charges.
-2. **Key Vault Soft-Delete Retention**:
+4. **Key Vault Soft-Delete Retention**:
    - Deleting the resource group retains Key Vault soft-delete protection for 90 days at zero additional charge.
-3. **Application Insights Ingestion Guard**:
+5. **Application Insights Ingestion Guard**:
    - Ingestion stays within the 5 GB/month free tier by retaining the default 30-day retention and disabling verbose tracing in production.

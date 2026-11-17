@@ -37,14 +37,21 @@ Edit `deploy/parameters/dev-demo.bicepparam`:
 
 ---
 
-### Step 3: Run Bicep What-If Pre-Flight Inspection
-Preview the exact resources that will be provisioned:
-```bash
-az deployment group what-if \
-  --resource-group "${RESOURCE_GROUP}" \
-  --template-file deploy/main.bicep \
-  --parameters deploy/parameters/dev-demo.bicepparam
-```
+### Step 3: Run Bicep What-If Pre-Flight Inspection (4-Stage Sequence)
+In accordance with Relay's deployment guards:
+1. **Preflight**: Verify regional provider registrations and SKU availability:
+   ```bash
+   ./deploy/scripts/deploy.sh demo centralindia --preflight
+   ```
+2. **Resource Group Preparation**: If `rg-relay-demo` does not exist, an empty resource group must be created to evaluate resource-group-scoped Bicep What-If. Creating an empty resource group provisions zero billable services.
+3. **What-If Evaluation**: Preview the exact resources that will be provisioned:
+   ```bash
+   az deployment group what-if \
+     --resource-group "${RESOURCE_GROUP}" \
+     --template-file deploy/main.bicep \
+     --parameters deploy/parameters/dev-demo.bicepparam
+   ```
+4. **Authorization**: Review the generated What-If changes. Live provisioning commences only after explicit operator authorization.
 
 ---
 
@@ -179,19 +186,24 @@ az storage blob upload-batch \
 
 ---
 
-### Step 10: Run Automated Smoke Tests
-Validate end-to-end functionality using the automated test suite:
+### Step 10: Run Automated Smoke Acceptance Tests
+Validate end-to-end functionality using the hardened acceptance suite. Export the generated plain-text API key:
+
 ```bash
-./deploy/scripts/smoke-test.sh "${API_URL}"
+# Export the real API key generated in Step 7 (never hardcoded in scripts):
+export RELAY_SMOKE_API_KEY="<YOUR_GENERATED_API_KEY>"
+
+# Execute acceptance tests against the live API:
+./deploy/scripts/smoke-test.sh "${API_URL}" https://httpbin.org/post
 ```
 
-The script verifies:
-1. Health liveness (`/health/live`)
-2. Health readiness (`/health/ready`)
-3. Event ingestion (`POST /v1/events` with `X-Api-Key`)
-4. Idempotent duplicate request deduplication
-5. Webhook endpoint registration (`POST /v1/endpoints`)
-6. Outbox dispatch and fan-out to Service Bus
-7. Delivery attempt logging (`GET /v1/deliveries`)
-8. Manual dead-letter replay (`POST /v1/deliveries/{id}/replay`)
-9. Single event query (`GET /v1/events/{id}`).
+The script evaluates:
+1. `API Liveness & Readiness Probes` (`GET /health/live`, `GET /health/ready`)
+2. `Authenticated Event Ingestion` (`POST /v1/events` with `X-Api-Key`, `Idempotency-Key`)
+3. `Duplicate Request Idempotency Enforcement` (asserts identical `eventId` on duplicate ingestion)
+4. `Webhook Endpoint Registration` (`POST /v1/endpoints` with subscribed events)
+5. `End-to-End Outbox Fan-out & Delivery Record` (submits event, polls `/v1/deliveries` for delivery record within 30s)
+6. `Single Event Query` (`GET /v1/events/{id}`)
+7. `Manual Dead-Letter Replay` (explicitly optional: tests replay when dead-lettered records exist; reports `SKIPPED` without error if no dead-lettered deliveries exist).
+
+Each test outputs `PASS`, `FAIL`, or `SKIPPED`. The suite exits with code 0 only when all mandatory tests pass.
