@@ -8,11 +8,10 @@ using '../main.bicep'
 
 param environment = 'demo'
 
-// Primary Indian deployment region providing complete service availability:
-// - Microsoft.App (Container Apps Consumption)
-// - Microsoft.Sql (Azure SQL Basic/Standard)
-// - Microsoft.ServiceBus (Standard Tier with duplicate detection)
-// - Microsoft.KeyVault, Microsoft.Storage, Microsoft.ContainerRegistry, Microsoft.Insights
+// Primary Indian deployment region providing complete service availability across all 10 required providers:
+// - Microsoft.App, Microsoft.Authorization, Microsoft.ContainerRegistry, Microsoft.Insights
+// - Microsoft.KeyVault, Microsoft.ManagedIdentity, Microsoft.OperationalInsights
+// - Microsoft.ServiceBus, Microsoft.Sql, Microsoft.Storage
 param location = 'centralindia'
 
 // Optional deployment salt: set to a short string (e.g. 'v2' or 'run2') when re-deploying

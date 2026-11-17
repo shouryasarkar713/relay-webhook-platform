@@ -39,12 +39,12 @@ Edit `deploy/parameters/dev-demo.bicepparam`:
 
 ### Step 3: Run Bicep What-If Pre-Flight Inspection (4-Stage Sequence)
 In accordance with Relay's deployment guards:
-1. **Preflight**: Verify regional provider registrations and SKU availability:
+1. **Preflight**: Verify regional provider registrations and SKU availability (subscription ID is mandatory):
    ```bash
-   ./deploy/scripts/deploy.sh demo centralindia --preflight
+   ./deploy/scripts/deploy.sh demo centralindia --subscription="${AZURE_SUBSCRIPTION_ID}" --preflight
    ```
 2. **Resource Group Preparation**: If `rg-relay-demo` does not exist, an empty resource group must be created to evaluate resource-group-scoped Bicep What-If. Creating an empty resource group provisions zero billable services.
-3. **What-If Evaluation**: Preview the exact resources that will be provisioned:
+3. **What-If Evaluation**: Preview the exact resources that will be provisioned using the authoritative parameter file:
    ```bash
    az deployment group what-if \
      --resource-group "${RESOURCE_GROUP}" \
@@ -94,8 +94,11 @@ Authenticate your container CLI with ACR:
 export DOCKER_COMMAND=podman
 az acr login --name "${ACR_NAME}"
 
-# Build and push API, Worker, and Admin images:
-IMAGE_TAG="v1.0.0"
+# Generate traceable per-deployment release tag (<short-sha>-<timestamp>):
+GIT_SHA=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "manual")
+UTC_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+IMAGE_TAG="${GIT_SHA}-${UTC_TIMESTAMP}"
+echo "Release Tag: ${IMAGE_TAG}"
 
 podman build -f src/Relay.Api/Dockerfile -t "${ACR_SERVER}/relay-api:${IMAGE_TAG}" .
 podman build -f src/Relay.Worker/Dockerfile -t "${ACR_SERVER}/relay-worker:${IMAGE_TAG}" .
@@ -202,7 +205,7 @@ The script evaluates:
 2. `Authenticated Event Ingestion` (`POST /v1/events` with `X-Api-Key`, `Idempotency-Key`)
 3. `Duplicate Request Idempotency Enforcement` (asserts identical `eventId` on duplicate ingestion)
 4. `Webhook Endpoint Registration` (`POST /v1/endpoints` with subscribed events)
-5. `End-to-End Outbox Fan-out & Delivery Record` (submits event, polls `/v1/deliveries` for delivery record within 30s)
+5. `End-to-End Outbox Fan-out & Delivery Record` (submits matching event, polls `/v1/deliveries` specifically matching the event ID until it reaches domain model status `Delivered` within 30s)
 6. `Single Event Query` (`GET /v1/events/{id}`)
 7. `Manual Dead-Letter Replay` (explicitly optional: tests replay when dead-lettered records exist; reports `SKIPPED` without error if no dead-lettered deliveries exist).
 

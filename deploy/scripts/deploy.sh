@@ -8,10 +8,13 @@ set -euo pipefail
 # 1. Separates ACR_NAME (for az acr login) from ACR_SERVER (for image tagging).
 # 2. Automatically detects and uses Podman or Docker.
 # 3. Supports local-only --dry-run mode without contacting or modifying cloud resources.
-# 4. Supports read-only --preflight mode for subscription, provider, and SKU checks.
-# 5. Implements a 4-Stage What-If sequence: requires explicit approval before creating
+# 4. Supports read-only --preflight mode with strict subscription & provider checks.
+# 5. Generates unique, traceable per-deployment release tags (<short-sha>-<timestamp>).
+# 6. Uses single reliable configuration source: static parameters from .bicepparam
+#    with explicit operator overrides for dynamic Entra credentials.
+# 7. Implements a 4-Stage What-If sequence: requires explicit approval before creating
 #    an empty RG for What-If, and a second explicit approval before live provisioning.
-# 6. Single authoritative migration flow: runs bootstrap-users as Entra Admin, updates
+# 8. Single authoritative migration flow: runs bootstrap-users as Entra Admin, updates
 #    Container Apps Job image, triggers job, and verifies Succeeded execution.
 # ==============================================================================
 
@@ -54,13 +57,34 @@ if [ ${#POSITIONAL_ARGS[@]} -ge 3 ] && [ -z "${DEPLOYMENT_SALT}" ]; then
 fi
 RG_NAME="rg-relay-${ENV}"
 
+# Resolve parameter file authoritative source
+PARAM_FILE="deploy/parameters/${ENV}.bicepparam"
+if [ ! -f "${PARAM_FILE}" ] && [ "${ENV}" = "demo" ] && [ -f "deploy/parameters/dev-demo.bicepparam" ]; then
+    PARAM_FILE="deploy/parameters/dev-demo.bicepparam"
+fi
+
+# Generate unique, traceable per-deployment release tag
+GIT_SHA=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+GIT_DIRTY=""
+if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+    GIT_DIRTY="-dirty"
+fi
+UTC_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+RELEASE_TAG="${GIT_SHA}${GIT_DIRTY}-${UTC_TIMESTAMP}"
+IMAGE_TAG="${RELEASE_TAG}"
+
 echo "=============================================================================="
 echo "RELAY CLOUD DEPLOYMENT ORCHESTRATOR"
 echo "Target Environment:     ${ENV}"
 echo "Target Region:          ${REGION}"
 echo "Resource Group:         ${RG_NAME}"
 echo "Deployment Salt:        ${DEPLOYMENT_SALT:-none}"
-echo "Target Subscription ID: ${TARGET_SUBSCRIPTION_ID:-auto-detect}"
+echo "Parameter File:         ${PARAM_FILE}"
+echo "Release Tag:            ${IMAGE_TAG}"
+echo "Source Git SHA:         ${GIT_SHA}"
+echo "Source Branch:          ${GIT_BRANCH}"
+echo "Target Subscription ID: ${TARGET_SUBSCRIPTION_ID:-not-specified}"
 echo "Execution Mode:         $( [ "${DRY_RUN}" = true ] && echo "Dry Run (Local Only)" || ( [ "${PREFLIGHT}" = true ] && echo "Preflight (Read-Only Cloud)" || echo "Live Deployment" ) )"
 echo "=============================================================================="
 
@@ -69,10 +93,10 @@ if command -v podman &> /dev/null; then
     CONTAINER_CLI="podman"
     export DOCKER_COMMAND="podman"
     PODMAN_VER=$(podman --version 2>/dev/null || echo "detected")
-    echo "Container Engine:   Podman (${PODMAN_VER})"
+    echo "Container Engine:       Podman (${PODMAN_VER})"
 elif command -v docker &> /dev/null; then
     CONTAINER_CLI="docker"
-    echo "Container Engine:   Docker ($(docker --version))"
+    echo "Container Engine:       Docker ($(docker --version))"
 else
     echo "ERROR: Neither Podman nor Docker is installed. Please install Podman (recommended on Fedora) or Docker."
     exit 1
@@ -91,37 +115,54 @@ if [ "${DRY_RUN}" = true ]; then
         echo "  - .NET SDK:         Not in PATH"
     fi
 
-    # Validate Bicep templates if Azure CLI is present
+    # Verify Parameter file exists
+    if [ ! -f "${PARAM_FILE}" ]; then
+        echo "ERROR: Required parameter file '${PARAM_FILE}' was not found."
+        echo "Dry-run validation failed."
+        exit 1
+    fi
+    echo "  - Parameter File:   ${PARAM_FILE} (Found)"
+
+    # Validate Bicep templates if Azure CLI / Bicep is present
     if command -v az &> /dev/null; then
         echo "  - Azure CLI:        Installed"
         echo "  - Validating Bicep compilation (deploy/main.bicep)..."
-        if az bicep build --file deploy/main.bicep --stdout > /dev/null 2>&1; then
-            echo "    Bicep template compiles cleanly."
-        else
-            echo "    WARNING: Bicep build check returned an issue."
+        if ! az bicep build --file deploy/main.bicep --stdout > /dev/null 2>&1; then
+            echo "ERROR: Bicep compilation failed for deploy/main.bicep."
+            exit 1
         fi
-    else
-        echo "  - Azure CLI:        Not installed (Bicep compilation check skipped)"
-    fi
+        echo "    Bicep main template compiles cleanly."
 
-    # Verify Parameter files
-    PARAM_FILE="deploy/parameters/${ENV}.bicepparam"
-    if [ ! -f "${PARAM_FILE}" ]; then
-        PARAM_FILE="deploy/parameters/dev-demo.bicepparam"
-    fi
-    if [ -f "${PARAM_FILE}" ]; then
-        echo "  - Parameter File:   ${PARAM_FILE} (Found)"
+        echo "  - Validating Bicep parameter file (${PARAM_FILE})..."
+        if ! az bicep build-params --file "${PARAM_FILE}" --stdout > /dev/null 2>&1; then
+            echo "ERROR: Bicep parameter file validation failed for ${PARAM_FILE}."
+            exit 1
+        fi
+        echo "    Bicep parameter file validates cleanly."
     else
-        echo "  - Parameter File:   WARNING: ${PARAM_FILE} not found"
+        echo "  - Azure CLI / Bicep: Not installed in local PATH"
+        echo "------------------------------------------------------------------------------"
+        echo "[DRY-RUN INCOMPLETE] Bicep tooling is not installed; Bicep templates and parameter files could not be validated."
+        echo "Install Azure CLI and Bicep locally to perform complete offline validation."
+        exit 2
     fi
 
     echo "------------------------------------------------------------------------------"
-    echo "[DRY-RUN COMPLETE] Local validation completed successfully."
+    echo "[DRY-RUN PASSED] Local validation completed successfully."
     echo "No cloud resources have been inspected, created, modified, or deleted."
     exit 0
 fi
 
-# 3. Check Azure CLI Installation & Authentication
+# 3. Mandatory Subscription ID & Azure CLI Guard for Cloud Operations
+if [ -z "${TARGET_SUBSCRIPTION_ID}" ]; then
+    echo ""
+    echo "ERROR: Target subscription ID is mandatory for cloud operations (--preflight and live deployment)."
+    echo "To prevent accidental deployments to an unintended subscription, you must specify the exact subscription ID:"
+    echo "  ./deploy/scripts/deploy.sh ${ENV} ${REGION} --subscription=<YOUR_SUBSCRIPTION_ID>"
+    echo "  or export AZURE_SUBSCRIPTION_ID=<YOUR_SUBSCRIPTION_ID>"
+    exit 1
+fi
+
 if ! command -v az &> /dev/null; then
     echo "ERROR: Azure CLI (az) is not installed or not in PATH."
     echo "Install Azure CLI: https://learn.microsoft.com/en-us/cli/azure/install-azure-cli"
@@ -139,12 +180,15 @@ SUBSCRIPTION_ID=$(echo "${ACCOUNT_INFO}" | jq -r .id)
 SUBSCRIPTION_STATE=$(echo "${ACCOUNT_INFO}" | jq -r .state)
 USER_NAME=$(echo "${ACCOUNT_INFO}" | jq -r .user.name)
 
-# 4. Subscription Identity Guard
-if [ -n "${TARGET_SUBSCRIPTION_ID}" ] && [ "${SUBSCRIPTION_ID}" != "${TARGET_SUBSCRIPTION_ID}" ]; then
+# Verify Active Subscription against Mandatory Target
+if [ "${SUBSCRIPTION_ID}" != "${TARGET_SUBSCRIPTION_ID}" ]; then
+    echo ""
     echo "ERROR: Target subscription ID does not match active Azure CLI subscription."
-    echo "  Expected: ${TARGET_SUBSCRIPTION_ID}"
-    echo "  Active:   ${SUBSCRIPTION_ID} (${SUBSCRIPTION_NAME})"
-    echo "To switch subscription, run:"
+    echo "  Expected Target:     ${TARGET_SUBSCRIPTION_ID}"
+    echo "  Active Subscription: ${SUBSCRIPTION_ID} (${SUBSCRIPTION_NAME})"
+    echo ""
+    echo "Automatic subscription switching is prohibited for safety."
+    echo "To switch your active Azure CLI subscription, run:"
     echo "  az account set --subscription ${TARGET_SUBSCRIPTION_ID}"
     exit 1
 fi
@@ -154,83 +198,117 @@ if [ "${SUBSCRIPTION_STATE}" != "Enabled" ]; then
     exit 1
 fi
 
-echo "Active Subscription: ${SUBSCRIPTION_NAME} (${SUBSCRIPTION_ID})"
-echo "Signed in as:        ${USER_NAME}"
+SAFE_SUB_ID="${SUBSCRIPTION_ID:0:8}-****-****-****-${SUBSCRIPTION_ID: -8}"
+echo "Active Subscription:    ${SUBSCRIPTION_NAME} (${SAFE_SUB_ID}) [${SUBSCRIPTION_STATE}]"
+echo "Signed in as:           ${USER_NAME}"
 echo "=============================================================================="
 
-# 5. Read-Only Preflight Mode (--preflight)
-if [ "${PREFLIGHT}" = true ]; then
-    echo "[PREFLIGHT MODE ACTIVATED] Performing read-only inspection against Azure..."
-    PREFLIGHT_STATUS="PASSED"
-
+# 4. Preflight Inspection Function (Shared by --preflight and live deployment)
+run_preflight() {
     echo ""
+    echo "=============================================================================="
+    echo "DEPLOYMENT PREFLIGHT READ-ONLY ASSESSMENT"
+    echo "Target Subscription: ${SUBSCRIPTION_NAME} (${SAFE_SUB_ID})"
+    echo "Target Region:       ${REGION}"
+    echo "=============================================================================="
+    
+    local preflight_passed=true
+
     echo "1. Resolving Entra Administrator Identity..."
     USER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || az ad user show --id "${USER_NAME}" --query id -o tsv 2>/dev/null || echo "")
     if [ -n "${USER_OBJECT_ID}" ]; then
         echo "   [OK] Entra Admin OID: ${USER_OBJECT_ID}"
     else
         echo "   [BLOCKER] Could not resolve Entra ID Object ID for '${USER_NAME}'."
-        PREFLIGHT_STATUS="FAILED"
+        preflight_passed=false
     fi
 
     echo ""
-    echo "2. Verifying Required Resource Providers (8 required)..."
-    PROVIDERS=(
+    echo "2. Verifying Required Resource Providers (10 required by Bicep templates)..."
+    REQUIRED_PROVIDERS=(
         "Microsoft.App"
-        "Microsoft.Sql"
-        "Microsoft.ServiceBus"
-        "Microsoft.KeyVault"
-        "Microsoft.Storage"
+        "Microsoft.Authorization"
         "Microsoft.ContainerRegistry"
-        "Microsoft.OperationalInsights"
         "Microsoft.Insights"
+        "Microsoft.KeyVault"
+        "Microsoft.ManagedIdentity"
+        "Microsoft.OperationalInsights"
+        "Microsoft.ServiceBus"
+        "Microsoft.Sql"
+        "Microsoft.Storage"
     )
-    for p in "${PROVIDERS[@]}"; do
-        STATE=$(az provider show --namespace "$p" --query registrationState -o tsv 2>/dev/null || echo "NotRegistered")
-        if [ "${STATE}" = "Registered" ]; then
-            echo "   [OK]      ${p}: ${STATE}"
+
+    for provider in "${REQUIRED_PROVIDERS[@]}"; do
+        REG_STATE=$(az provider show --namespace "${provider}" --query "registrationState" -o tsv 2>/dev/null || echo "Unknown")
+        if [ "${REG_STATE}" = "Registered" ]; then
+            echo "   [OK] ${provider}: ${REG_STATE}"
         else
-            echo "   [BLOCKER] ${p}: ${STATE} (Must be registered prior to deployment)"
-            PREFLIGHT_STATUS="FAILED"
+            echo "   [BLOCKER] ${provider} is not registered (state: '${REG_STATE}')."
+            preflight_passed=false
         fi
     done
 
     echo ""
-    echo "3. Verifying Azure SQL Basic SKU Availability in '${REGION}'..."
+    echo "3. Verifying Regional Azure SQL Basic Availability..."
     SQL_EDITIONS=$(az sql db list-editions --location "${REGION}" --edition Basic --available -o table 2>/dev/null || true)
     if echo "${SQL_EDITIONS}" | grep -q "Basic"; then
         echo "   [OK] Azure SQL Basic edition is available in '${REGION}' for this subscription."
     else
         echo "   [BLOCKER] Azure SQL Basic edition availability could not be verified in '${REGION}'."
-        PREFLIGHT_STATUS="FAILED"
+        preflight_passed=false
     fi
 
     echo ""
     echo "4. Verifying Regional Service Support in '${REGION}'..."
-    ACA_REGIONS=$(az provider show --namespace Microsoft.App --query "resourceTypes[?resourceType=='containerApps'].locations" -o tsv 2>/dev/null || true)
-    if echo "${ACA_REGIONS}" | tr '[:upper:]' '[:lower:]' | grep -q "${REGION}"; then
-        echo "   [OK] Microsoft.App/containerApps supported in '${REGION}'."
-    else
-        echo "   [BLOCKER] Microsoft.App/containerApps not reported in '${REGION}'."
-        PREFLIGHT_STATUS="FAILED"
-    fi
+    # Array of namespace:resourceType pairs deployed by Relay IaC
+    REGIONAL_CHECKS=(
+        "Microsoft.App:containerApps"
+        "Microsoft.App:managedEnvironments"
+        "Microsoft.Sql:servers"
+        "Microsoft.ServiceBus:namespaces"
+        "Microsoft.KeyVault:vaults"
+        "Microsoft.Storage:storageAccounts"
+        "Microsoft.ContainerRegistry:registries"
+        "Microsoft.ManagedIdentity:userAssignedIdentities"
+        "Microsoft.OperationalInsights:workspaces"
+        "Microsoft.Insights:components"
+    )
 
-    SB_REGIONS=$(az provider show --namespace Microsoft.ServiceBus --query "resourceTypes[?resourceType=='namespaces'].locations" -o tsv 2>/dev/null || true)
-    if echo "${SB_REGIONS}" | tr '[:upper:]' '[:lower:]' | grep -q "${REGION}"; then
-        echo "   [OK] Microsoft.ServiceBus/namespaces supported in '${REGION}'."
-    else
-        echo "   [BLOCKER] Microsoft.ServiceBus/namespaces not reported in '${REGION}'."
-        PREFLIGHT_STATUS="FAILED"
-    fi
+    for item in "${REGIONAL_CHECKS[@]}"; do
+        ns="${item%%:*}"
+        rtype="${item##*:}"
+        LOCATIONS=$(az provider show --namespace "${ns}" --query "resourceTypes[?resourceType=='${rtype}'].locations" -o tsv 2>/dev/null || true)
+        if echo "${LOCATIONS}" | tr '[:upper:]' '[:lower:]' | grep -q "${REGION}"; then
+            echo "   [OK] ${ns}/${rtype} supported in '${REGION}'."
+        else
+            echo "   [BLOCKER] ${ns}/${rtype} not reported in '${REGION}'."
+            preflight_passed=false
+        fi
+    done
+
+    echo ""
+    echo "5. Regional Quota & Capacity Assessment..."
+    echo "   [INFO] Real-time ACA Consumption vCore capacity and student subscription quota limits"
+    echo "          cannot be verified programmatically via read-only CLI metadata queries."
+    echo "   [UNVERIFIED via CLI] Capacity & Quota (Verify via Azure Portal > Subscriptions > Usage + quotas)."
 
     echo "=============================================================================="
-    if [ "${PREFLIGHT_STATUS}" = "PASSED" ]; then
-        echo "[PREFLIGHT PASSED] All required resource providers and regional SKUs are verified."
-        echo "No cloud resources were created or modified."
+    if [ "${preflight_passed}" = true ]; then
+        echo "[PREFLIGHT PASSED] All verifiable resource providers and regional SKUs are verified."
+        return 0
+    else
+        echo "[PREFLIGHT FAILED] One or more mandatory prerequisites are missing or not registered."
+        echo "Resolve the blockers listed above before initiating deployment."
+        return 1
+    fi
+}
+
+# 5. Read-Only Preflight Mode (--preflight)
+if [ "${PREFLIGHT}" = true ]; then
+    if run_preflight; then
+        echo "Preflight check completed successfully. No cloud resources were created or modified."
         exit 0
     else
-        echo "[PREFLIGHT FAILED] One or more prerequisites are missing or not registered."
-        echo "Correct the reported blockers above before initiating deployment."
         exit 1
     fi
 fi
@@ -239,8 +317,27 @@ fi
 # LIVE DEPLOYMENT SEQUENCE (4-STAGE WHAT-IF & SEPARATE APPROVAL BOUNDARIES)
 # ------------------------------------------------------------------------------
 
-# Stage 1: Resolve Entra ID Admin Object ID
-USER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || az ad user show --id "${USER_NAME}" --query id -o tsv 2>/dev/null || echo "")
+# Stage 0: Mandatory Preflight Execution Before Any Cloud Action
+echo "[STAGE 0] Enforcing mandatory preflight checks before provisioning..."
+if ! run_preflight; then
+    echo "ERROR: Preflight validation failed. Aborting live deployment."
+    exit 1
+fi
+
+# Verify parameter file exists
+if [ ! -f "${PARAM_FILE}" ]; then
+    echo "ERROR: Required parameter file '${PARAM_FILE}' was not found. Aborting deployment."
+    exit 1
+fi
+
+# Stage 1: Entra ID Admin Object ID Resolution
+echo ""
+echo "=============================================================================="
+echo "STAGE 1: ENTRA ID ADMIN RESOLUTION"
+echo "=============================================================================="
+if [ -z "${USER_OBJECT_ID:-}" ]; then
+    USER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || az ad user show --id "${USER_NAME}" --query id -o tsv 2>/dev/null || echo "")
+fi
 if [ -z "${USER_OBJECT_ID}" ]; then
     echo "WARNING: Could not automatically resolve Entra ID Object ID for '${USER_NAME}'."
     read -rp "Please enter your Entra ID Object ID for Azure SQL Admin: " USER_OBJECT_ID
@@ -280,11 +377,12 @@ echo ""
 echo "=============================================================================="
 echo "STAGE 3: BICEP WHAT-IF PREVIEW"
 echo "=============================================================================="
-echo "Executing What-If preview against '${RG_NAME}'..."
+echo "Executing What-If preview against '${RG_NAME}' using parameter file '${PARAM_FILE}'..."
 
 if ! az deployment group what-if \
     --resource-group "${RG_NAME}" \
     --template-file deploy/main.bicep \
+    --parameters "${PARAM_FILE}" \
     --parameters environment="${ENV}" location="${REGION}" entraAdminName="${USER_NAME}" entraAdminObjectId="${USER_OBJECT_ID}" entraAdminType="User" deploymentSalt="${DEPLOYMENT_SALT}"; then
     echo ""
     echo "ERROR: Bicep What-If preview failed or could not be evaluated by Azure."
@@ -311,6 +409,7 @@ DEPLOYMENT_NAME="relay-deploy-$(date +%s)"
 DEPLOY_OUTPUT=$(az deployment group create \
     --resource-group "${RG_NAME}" \
     --template-file deploy/main.bicep \
+    --parameters "${PARAM_FILE}" \
     --parameters environment="${ENV}" location="${REGION}" entraAdminName="${USER_NAME}" entraAdminObjectId="${USER_OBJECT_ID}" entraAdminType="User" deploymentSalt="${DEPLOYMENT_SALT}" \
     --name "${DEPLOYMENT_NAME}" \
     --query properties.outputs -o json)
@@ -332,14 +431,14 @@ echo "  SQL Database:       ${SQL_DB}"
 echo "  API Endpoint:       ${API_URL}"
 echo "  Frontend Web:       ${FRONTEND_URL}"
 echo "  Migration Job:      ${MIGRATION_JOB_NAME}"
+echo "  Release Tag:        ${IMAGE_TAG}"
 echo "=============================================================================="
 
 # Stage 6: Authenticate Container CLI and Build/Push Images
 echo "[STEP 2/6] Authenticating ${CONTAINER_CLI} with ACR '${ACR_NAME}'..."
 az acr login --name "${ACR_NAME}"
 
-echo "[STEP 3/6] Building and Pushing Container Images (${CONTAINER_CLI})..."
-IMAGE_TAG="v1.0.0"
+echo "[STEP 3/6] Building and Pushing Container Images with Release Tag '${IMAGE_TAG}' (${CONTAINER_CLI})..."
 
 ${CONTAINER_CLI} build -f src/Relay.Api/Dockerfile -t "${ACR_SERVER}/relay-api:${IMAGE_TAG}" .
 ${CONTAINER_CLI} build -f src/Relay.Worker/Dockerfile -t "${ACR_SERVER}/relay-worker:${IMAGE_TAG}" .
@@ -426,7 +525,7 @@ if [ "${JOB_SUCCEEDED}" != true ]; then
 fi
 
 # Stage 8: Deploy Container Apps Revisions & Frontend
-echo "[STEP 5/6] Updating Container Apps Revisions (ca-relay-api, ca-relay-worker)..."
+echo "[STEP 5/6] Updating Container Apps Revisions (ca-relay-api, ca-relay-worker) to Release Tag '${IMAGE_TAG}'..."
 az containerapp update --name ca-relay-api --resource-group "${RG_NAME}" --image "${ACR_SERVER}/relay-api:${IMAGE_TAG}"
 az containerapp update --name ca-relay-worker --resource-group "${RG_NAME}" --image "${ACR_SERVER}/relay-worker:${IMAGE_TAG}"
 
@@ -447,5 +546,6 @@ echo "==========================================================================
 echo "DEPLOYMENT COMPLETED SUCCESSFULLY!"
 echo "API Endpoint:        ${API_URL}"
 echo "Frontend Dashboard:  ${FRONTEND_URL}"
+echo "Release Tag:         ${IMAGE_TAG}"
 echo "Next Step: Generate tenant and API key via relay-admin, then run smoke-test.sh."
 echo "=============================================================================="

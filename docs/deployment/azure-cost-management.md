@@ -24,7 +24,7 @@ This document provides a subscription-aware, verified cost reconciliation for de
 
 ### 2.2 Messaging Decision: Azure Service Bus Standard Tier
 - **Why Standard**: Required for the `relay-events` queue because Azure Service Bus **Basic tier does not support Duplicate Detection or Dead-Letter Queues**.
-- **Pricing Structure**: Base charge of ~$0.0135/hour = **~$10.05/month** (~₹835 INR/month). Includes 13 million message operations free per month.
+- **Pricing Structure**: Base charge of ~$0.0135/hour = **~$9.72/month** (30 days / 720 hours) or **~$10.05/month** (31 days / 744 hours) (~₹810 – ₹835 INR/month). Includes 13 million message operations free per month.
 
 ### 2.3 Compute Decision: Azure Container Apps (Consumption Tier)
 - **Allocations**:

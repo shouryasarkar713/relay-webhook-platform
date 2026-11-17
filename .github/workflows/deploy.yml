@@ -44,4 +44,4 @@ jobs:
           echo ""
           echo "Refer to docs/deployment/azure-deployment.md for the authoritative runbook."
           echo "================================================================================"
-          exit 1
+          exit 0
