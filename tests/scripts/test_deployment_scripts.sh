@@ -528,6 +528,206 @@ else
     PASS_COUNT=$((PASS_COUNT + 1))
 fi
 
+# ------------------------------------------------------------------------------
+# Test 18: Regional Location Normalization Regression Tests (Task A)
+# ------------------------------------------------------------------------------
+# Subcase A: Azure display name 'Central India' matches requested region 'centralindia'
+cat << 'EOF' > "${MOCK_BIN}/az"
+#!/usr/bin/env bash
+echo "az $*" >> "${AZ_LOG}"
+if [ "$1" = "account" ] && [ "$2" = "show" ]; then
+    echo '{"id":"sub-1111","name":"Test Sub","state":"Enabled","user":{"name":"dev@example.com"}}'
+    exit 0
+elif [ "$1" = "ad" ]; then
+    echo "00000000-0000-0000-0000-000000000000"
+    exit 0
+elif [ "$1" = "provider" ] && [ "$2" = "show" ]; then
+    if [[ "$*" == *"--query registrationState"* ]]; then
+        echo "Registered"
+    else
+        echo '[["West US 2", "Southeast Asia", "Central India", "South India"]]'
+    fi
+    exit 0
+elif [ "$1" = "sql" ] && [ "$2" = "db" ] && [ "$3" = "list-editions" ]; then
+    echo "Basic Standard"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/az"
+: > "${AZ_LOG}"
+
+OUT_18A=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" demo centralindia --subscription=sub-1111 --preflight 2>&1) || CODE_18A=$?
+assert_test "Display name 'Central India' matches requested 'centralindia'" "${CODE_18A:-0}" 0 "${OUT_18A}" "\\[OK\\] Microsoft\\.App/containerApps supported in 'centralindia'\\."
+
+# Subcase B: Mixed case with canonical name 'cEnTrAlInDiA' matches
+OUT_18B=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" demo cEnTrAlInDiA --subscription=sub-1111 --preflight 2>&1) || CODE_18B=$?
+assert_test "Mixed case requested region 'cEnTrAlInDiA' matches 'Central India'" "${CODE_18B:-0}" 0 "${OUT_18B}" "\\[OK\\] Microsoft\\.App/containerApps supported in 'cEnTrAlInDiA'\\."
+
+# Subcase C: Distinct geographical region 'North Central India' does NOT match 'centralindia'
+cat << 'EOF' > "${MOCK_BIN}/az"
+#!/usr/bin/env bash
+echo "az $*" >> "${AZ_LOG}"
+if [ "$1" = "account" ] && [ "$2" = "show" ]; then
+    echo '{"id":"sub-1111","name":"Test Sub","state":"Enabled","user":{"name":"dev@example.com"}}'
+    exit 0
+elif [ "$1" = "ad" ]; then
+    echo "00000000-0000-0000-0000-000000000000"
+    exit 0
+elif [ "$1" = "provider" ] && [ "$2" = "show" ]; then
+    if [[ "$*" == *"--query registrationState"* ]]; then
+        echo "Registered"
+    else
+        echo '[["West US 2", "North Central India", "South India"]]'
+    fi
+    exit 0
+elif [ "$1" = "sql" ] && [ "$2" = "db" ] && [ "$3" = "list-editions" ]; then
+    echo "Basic Standard"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/az"
+: > "${AZ_LOG}"
+
+OUT_18C=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" demo centralindia --subscription=sub-1111 --preflight 2>&1) || CODE_18C=$?
+assert_test "'North Central India' does not falsely match 'centralindia'" "${CODE_18C:-0}" 1 "${OUT_18C}" "\\[BLOCKER\\] Microsoft\\.App/containerApps not reported in 'centralindia'\\."
+
+# Subcase D: Empty or malformed Azure CLI location output fails closed
+cat << 'EOF' > "${MOCK_BIN}/az"
+#!/usr/bin/env bash
+echo "az $*" >> "${AZ_LOG}"
+if [ "$1" = "account" ] && [ "$2" = "show" ]; then
+    echo '{"id":"sub-1111","name":"Test Sub","state":"Enabled","user":{"name":"dev@example.com"}}'
+    exit 0
+elif [ "$1" = "ad" ]; then
+    echo "00000000-0000-0000-0000-000000000000"
+    exit 0
+elif [ "$1" = "provider" ] && [ "$2" = "show" ]; then
+    if [[ "$*" == *"--query registrationState"* ]]; then
+        echo "Registered"
+    else
+        echo 'INVALID_NON_JSON_CORRUPTED_RESPONSE'
+    fi
+    exit 0
+elif [ "$1" = "sql" ] && [ "$2" = "db" ] && [ "$3" = "list-editions" ]; then
+    echo "Basic Standard"
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/az"
+: > "${AZ_LOG}"
+
+OUT_18D=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" demo centralindia --subscription=sub-1111 --preflight 2>&1) || CODE_18D=$?
+assert_test "Malformed or non-matching Azure CLI location output fails closed" "${CODE_18D:-0}" 1 "${OUT_18D}" "\\[PREFLIGHT FAILED\\]"
+
+# ------------------------------------------------------------------------------
+# Test 19: Git Release-Tag Cleanliness Hardening Tests (Task B)
+# ------------------------------------------------------------------------------
+# Test in isolated temporary repositories to guarantee zero pollution of the main repo
+GIT_TEST_DIR=$(mktemp -d)
+(
+    cd "${GIT_TEST_DIR}"
+    git init -q
+    git config user.name "Test User"
+    git config user.email "test@example.com"
+    echo "initial" > file.txt
+    git add file.txt
+    git commit -q -m "Initial commit"
+
+    # Case 1: Completely clean repo -> no -dirty
+    TAG_CLEAN=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" --dry-run 2>&1 || true)
+    TAG_CLEAN_VAL=$(echo "${TAG_CLEAN}" | grep "Release Tag:" | awk '{print $3}')
+    if [[ "${TAG_CLEAN_VAL}" == *-dirty-* ]]; then
+        echo "  [FAIL] Isolated clean repo produced dirty tag: ${TAG_CLEAN_VAL}"
+        exit 1
+    fi
+
+    # Case 2: Staged modification -> must be -dirty
+    echo "modified" > file.txt
+    git add file.txt
+    TAG_STAGED=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" --dry-run 2>&1 || true)
+    TAG_STAGED_VAL=$(echo "${TAG_STAGED}" | grep "Release Tag:" | awk '{print $3}')
+    if [[ "${TAG_STAGED_VAL}" != *-dirty-* ]]; then
+        echo "  [FAIL] Isolated staged modification did not produce dirty tag: ${TAG_STAGED_VAL}"
+        exit 1
+    fi
+    git reset -q --hard HEAD
+
+    # Case 3: Unstaged modification -> must be -dirty
+    echo "modified unstaged" > file.txt
+    TAG_UNSTAGED=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" --dry-run 2>&1 || true)
+    TAG_UNSTAGED_VAL=$(echo "${TAG_UNSTAGED}" | grep "Release Tag:" | awk '{print $3}')
+    if [[ "${TAG_UNSTAGED_VAL}" != *-dirty-* ]]; then
+        echo "  [FAIL] Isolated unstaged modification did not produce dirty tag: ${TAG_UNSTAGED_VAL}"
+        exit 1
+    fi
+    git reset -q --hard HEAD
+
+    # Case 4: Untracked file -> must be -dirty
+    echo "new untracked" > untracked.txt
+    TAG_UNTRACKED=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" --dry-run 2>&1 || true)
+    TAG_UNTRACKED_VAL=$(echo "${TAG_UNTRACKED}" | grep "Release Tag:" | awk '{print $3}')
+    if [[ "${TAG_UNTRACKED_VAL}" != *-dirty-* ]]; then
+        echo "  [FAIL] Isolated untracked file did not produce dirty tag: ${TAG_UNTRACKED_VAL}"
+        exit 1
+    fi
+    rm -f untracked.txt
+
+    # Case 5: Deleted tracked file -> must be -dirty
+    rm -f file.txt
+    TAG_DELETED=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" --dry-run 2>&1 || true)
+    TAG_DELETED_VAL=$(echo "${TAG_DELETED}" | grep "Release Tag:" | awk '{print $3}')
+    if [[ "${TAG_DELETED_VAL}" != *-dirty-* ]]; then
+        echo "  [FAIL] Isolated deleted tracked file did not produce dirty tag: ${TAG_DELETED_VAL}"
+        exit 1
+    fi
+    git reset -q --hard HEAD
+
+    # Case 6: Multiple simultaneous changes -> must be -dirty
+    echo "mod" > file.txt
+    echo "new" > extra.txt
+    TAG_MULTI=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" --dry-run 2>&1 || true)
+    TAG_MULTI_VAL=$(echo "${TAG_MULTI}" | grep "Release Tag:" | awk '{print $3}')
+    if [[ "${TAG_MULTI_VAL}" != *-dirty-* ]]; then
+        echo "  [FAIL] Isolated multiple changes did not produce dirty tag: ${TAG_MULTI_VAL}"
+        exit 1
+    fi
+    git reset -q --hard HEAD
+    rm -f extra.txt
+)
+GIT_TEST_RES=$?
+rm -rf "${GIT_TEST_DIR}"
+
+if [ "${GIT_TEST_RES}" -eq 0 ]; then
+    echo "  [PASS] Git release-tag cleanliness detection across all states (clean, staged, unstaged, untracked, deleted, multi)"
+    PASS_COUNT=$((PASS_COUNT + 1))
+else
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# Case 7: Git failure fails safely (sets -dirty)
+cat << 'EOF' > "${MOCK_BIN}/git"
+#!/usr/bin/env bash
+if [ "$1" = "status" ]; then
+    echo "fatal: corrupted git repo" >&2
+    exit 128
+fi
+exec /usr/bin/git "$@"
+EOF
+chmod +x "${MOCK_BIN}/git"
+
+OUT_19G=$(PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" --dry-run 2>&1 | grep "Release Tag:" | awk '{print $3}')
+rm -f "${MOCK_BIN}/git"
+if [[ "${OUT_19G}" == *-dirty-* ]]; then
+    echo "  [PASS] Git status query failure fails safely by marking release tag dirty"
+    PASS_COUNT=$((PASS_COUNT + 1))
+else
+    echo "  [FAIL] Git status query failure did not mark release tag dirty: ${OUT_19G}"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
 echo "=============================================================================="
 echo "TEST SUMMARY: Passed: ${PASS_COUNT}, Failed: ${FAIL_COUNT}"
 echo "=============================================================================="

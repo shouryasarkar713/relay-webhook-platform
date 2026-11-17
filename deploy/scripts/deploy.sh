@@ -67,7 +67,9 @@ fi
 GIT_SHA=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 GIT_DIRTY=""
-if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+# Accurately detect any working-tree dirty state (staged, unstaged, untracked, deleted, renamed)
+GIT_STATUS=$(git status --porcelain=v1 --untracked-files=all 2>/dev/null) || GIT_STATUS="FAILED_TO_QUERY_GIT_STATUS"
+if [ -n "${GIT_STATUS}" ]; then
     GIT_DIRTY="-dirty"
 fi
 UTC_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -277,8 +279,37 @@ run_preflight() {
     for item in "${REGIONAL_CHECKS[@]}"; do
         ns="${item%%:*}"
         rtype="${item##*:}"
-        LOCATIONS=$(az provider show --namespace "${ns}" --query "resourceTypes[?resourceType=='${rtype}'].locations" -o tsv 2>/dev/null || true)
-        if echo "${LOCATIONS}" | tr '[:upper:]' '[:lower:]' | grep -q "${REGION}"; then
+        LOC_RAW=$(az provider show --namespace "${ns}" --query "resourceTypes[?resourceType=='${rtype}'].locations" -o json 2>/dev/null || true)
+        if [ -z "${LOC_RAW}" ]; then
+            LOC_RAW=$(az provider show --namespace "${ns}" --query "resourceTypes[?resourceType=='${rtype}'].locations" -o tsv 2>/dev/null || true)
+        fi
+        
+        # Robust, whitespace- and case-insensitive exact matching via jq
+        # Handles both JSON array output from real Azure CLI queries and plain TSV/text from mocks.
+        # Canonical Azure region names (e.g. 'centralindia') and display names (e.g. 'Central India')
+        # are normalized by stripping all non-alphanumeric characters and comparing against the normalized target region.
+        is_supported=$(echo "${LOC_RAW}" | jq -R -s -r --arg region "${REGION}" '
+            def norm: ascii_downcase | gsub("[^a-z0-9]"; "");
+            ($region | norm) as $t |
+            (try fromjson catch null) as $parsed |
+            if ($parsed != null) then
+                ($parsed | flatten) as $arr |
+                if ($t | length) > 0 and any($arr[]; (try norm catch "") == $t) then
+                    "true"
+                else
+                    "false"
+                end
+            else
+                (split("\n") | map(split("\t")) | flatten) as $arr |
+                if ($t | length) > 0 and any($arr[]; (try norm catch "") == $t) then
+                    "true"
+                else
+                    "false"
+                end
+            end
+        ' 2>/dev/null || echo "false")
+
+        if [ "${is_supported}" = "true" ]; then
             echo "   [OK] ${ns}/${rtype} supported in '${REGION}'."
         else
             echo "   [BLOCKER] ${ns}/${rtype} not reported in '${REGION}'."
