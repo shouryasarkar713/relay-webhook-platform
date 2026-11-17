@@ -1,0 +1,39 @@
+# Visual Studio / .NET
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.idea/
+.vscode/
+*.DotSettings.user
+
+# Build output
+*.log
+_ReSharper*/
+TestResults/
+coverage/
+
+# .NET User Secrets
+secrets.json
+
+# Node.js / React / Vite
+node_modules/
+frontend/relay-dashboard/dist/
+frontend/relay-dashboard/.env.local
+frontend/relay-dashboard/.env.*.local
+frontend/relay-dashboard/node_modules/
+*.tsbuildinfo
+.npm/
+
+# Environment files & Secrets
+.env
+*.pem
+*.key
+*.pfx
+
+# OS files
+.DS_Store
+Thumbs.db
