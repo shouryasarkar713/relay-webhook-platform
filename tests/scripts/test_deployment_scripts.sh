@@ -728,6 +728,97 @@ else
     FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
+# ------------------------------------------------------------------------------
+# Test 20: SQL Managed Identity Bootstrap Name Alignment (Task A)
+# ------------------------------------------------------------------------------
+# Subcase A: Demo environment passes exact expected identity names
+DOTNET_LOG="${TMP_DIR}/dotnet_invocations.log"
+cat << EOF > "${MOCK_BIN}/dotnet"
+#!/usr/bin/env bash
+echo "dotnet \$*" >> "${DOTNET_LOG}"
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/dotnet"
+: > "${DOTNET_LOG}"
+
+cat << 'EOF' > "${MOCK_BIN}/az"
+#!/usr/bin/env bash
+echo "az $*" >> "${AZ_LOG}"
+if [ "$1" = "account" ] && [ "$2" = "show" ]; then
+    echo '{"id":"sub-1111","name":"Test Sub","state":"Enabled","user":{"name":"dev@example.com"}}'
+    exit 0
+elif [ "$1" = "ad" ]; then
+    echo "00000000-0000-0000-0000-000000000000"
+    exit 0
+elif [ "$1" = "provider" ] && [ "$2" = "show" ]; then
+    if [[ "$*" == *"--query registrationState"* ]]; then
+        echo "Registered"
+    else
+        echo '[["Central India"]]'
+    fi
+    exit 0
+elif [ "$1" = "sql" ] && [ "$2" = "db" ] && [ "$3" = "list-editions" ]; then
+    echo "Basic Standard"
+    exit 0
+elif [ "$1" = "group" ] && [ "$2" = "exists" ]; then
+    echo "true"
+    exit 0
+elif [ "$1" = "deployment" ] && [ "$2" = "group" ] && [ "$3" = "what-if" ]; then
+    exit 0
+elif [ "$1" = "deployment" ] && [ "$2" = "group" ] && [ "$3" = "create" ]; then
+    echo '{"apiUrl":{"value":"https://api.example.com"},"acrName":{"value":"acrtest"},"acrLoginServer":{"value":"acrtest.azurecr.io"},"frontendWebEndpoint":{"value":"https://web.example.com"},"frontendStorageAccountName":{"value":"sawebtest"},"migrationJobName":{"value":"job-relay-migration"},"sqlServerFqdn":{"value":"sql.example.com"},"sqlDatabaseName":{"value":"sqldb"}}'
+    exit 0
+elif [ "$1" = "containerapp" ] && [ "$2" = "job" ]; then
+    if [ "$3" = "start" ]; then
+        echo "exec-12345"
+    elif [ "$3" = "execution" ]; then
+        echo "Succeeded"
+    fi
+    exit 0
+elif [ "$1" = "containerapp" ] && [ "$2" = "update" ]; then
+    exit 0
+elif [ "$1" = "storage" ] && [ "$2" = "blob" ] && [ "$3" = "upload-batch" ]; then
+    exit 0
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/az"
+: > "${AZ_LOG}"
+
+# Create mock podman that does nothing
+cat << 'EOF' > "${MOCK_BIN}/podman"
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/podman"
+
+# Run deployment orchestrator with approval in test environment (using mocks)
+OUT_20A=$(printf "yes\n" | PATH="${MOCK_BIN}:$PATH" "${TEST_DIR}/deploy/scripts/deploy.sh" demo centralindia --subscription=sub-1111 2>&1) || CODE_20A=$?
+rm -f "${MOCK_BIN}/podman" "${MOCK_BIN}/dotnet"
+
+BOOTSTRAP_CMD=$(grep "bootstrap-users" "${DOTNET_LOG}" 2>/dev/null || true)
+if echo "${BOOTSTRAP_CMD}" | grep -q -- "--api-identity id-relay-demo-api" && \
+   echo "${BOOTSTRAP_CMD}" | grep -q -- "--worker-identity id-relay-demo-worker" && \
+   echo "${BOOTSTRAP_CMD}" | grep -q -- "--migration-identity id-relay-demo-migration"; then
+    echo "  [PASS] SQL bootstrap passes environment-aligned identity names (id-relay-demo-api, id-relay-demo-worker, id-relay-demo-migration)"
+    PASS_COUNT=$((PASS_COUNT + 1))
+else
+    echo "  [FAIL] SQL bootstrap identity names mismatch: ${BOOTSTRAP_CMD}"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# ------------------------------------------------------------------------------
+# Test 21: Azure Static Website Bicep Template Declarative Hosting (Task B)
+# ------------------------------------------------------------------------------
+BICEP_JSON=$(az bicep build --file "${TEST_DIR}/deploy/modules/frontend-hosting.bicep" --stdout 2>/dev/null || true)
+if echo "${BICEP_JSON}" | jq -e '.resources[] | select(.type=="Microsoft.Storage/storageAccounts/blobServices") | .properties.staticWebsite.enabled == true and .properties.staticWebsite.indexDocument == "index.html" and .properties.staticWebsite.errorDocument404Path == "index.html"' >/dev/null 2>&1; then
+    echo "  [PASS] Frontend hosting Bicep module declaratively enables staticWebsite with index and 404 documents"
+    PASS_COUNT=$((PASS_COUNT + 1))
+else
+    echo "  [FAIL] Frontend hosting Bicep module does not configure staticWebsite correctly"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
 echo "=============================================================================="
 echo "TEST SUMMARY: Passed: ${PASS_COUNT}, Failed: ${FAIL_COUNT}"
 echo "=============================================================================="

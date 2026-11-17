@@ -484,8 +484,22 @@ echo "[STEP 4/6] Executing Azure SQL Database Bootstrap and Container Apps Migra
 export ConnectionStrings__RelayDatabase="Server=tcp:${SQL_SERVER},1433;Database=${SQL_DB};Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;"
 
 # 1. Bootstrap external managed identity users in Azure SQL (as Entra Admin)
+# Use exact managed identity names configured by Bicep ('id-relay-${ENV}-<role>')
+IDENTITY_PREFIX="relay-${ENV}"
+API_IDENTITY_NAME="id-${IDENTITY_PREFIX}-api"
+WORKER_IDENTITY_NAME="id-${IDENTITY_PREFIX}-worker"
+MIGRATION_IDENTITY_NAME="id-${IDENTITY_PREFIX}-migration"
+
 echo "Bootstrapping external Managed Identity users in Azure SQL..."
-dotnet run --project src/Relay.Admin/Relay.Admin.csproj -- bootstrap-users
+echo "  - API Identity:       ${API_IDENTITY_NAME}"
+echo "  - Worker Identity:    ${WORKER_IDENTITY_NAME}"
+echo "  - Migration Identity: ${MIGRATION_IDENTITY_NAME}"
+
+dotnet run --project src/Relay.Admin/Relay.Admin.csproj -- \
+    bootstrap-users \
+    --api-identity "${API_IDENTITY_NAME}" \
+    --worker-identity "${WORKER_IDENTITY_NAME}" \
+    --migration-identity "${MIGRATION_IDENTITY_NAME}"
 
 # 2. Update Container Apps Migration Job with the newly pushed image
 echo "Updating Migration Job image to '${ACR_SERVER}/relay-admin:${IMAGE_TAG}'..."
@@ -566,12 +580,35 @@ npm ci
 npm run build
 cd ../..
 
-az storage blob upload-batch \
-    --account-name "${WEB_STORAGE_ACCOUNT}" \
-    --auth-mode login \
-    --destination '$web' \
-    --source frontend/relay-dashboard/dist \
-    --overwrite
+# Upload frontend static distribution bundle to $web container with bounded retry for RBAC propagation
+echo "Uploading frontend distribution to '${WEB_STORAGE_ACCOUNT}/\$web'..."
+UPLOAD_MAX_ATTEMPTS=6
+UPLOAD_ATTEMPT=1
+UPLOAD_SUCCESS=false
+
+while [ ${UPLOAD_ATTEMPT} -le ${UPLOAD_MAX_ATTEMPTS} ]; do
+    if az storage blob upload-batch \
+        --account-name "${WEB_STORAGE_ACCOUNT}" \
+        --auth-mode login \
+        --destination '$web' \
+        --source frontend/relay-dashboard/dist \
+        --overwrite; then
+        UPLOAD_SUCCESS=true
+        break
+    else
+        echo "  [WARNING] Frontend upload failed (attempt ${UPLOAD_ATTEMPT}/${UPLOAD_MAX_ATTEMPTS}). Storage RBAC assignment may still be propagating in Azure Entra ID..."
+        if [ ${UPLOAD_ATTEMPT} -lt ${UPLOAD_MAX_ATTEMPTS} ]; then
+            echo "  Waiting 15 seconds before retry..."
+            sleep 15
+        fi
+        UPLOAD_ATTEMPT=$((UPLOAD_ATTEMPT + 1))
+    fi
+done
+
+if [ "${UPLOAD_SUCCESS}" != true ]; then
+    echo "ERROR: Failed to upload frontend assets to '${WEB_STORAGE_ACCOUNT}/\$web' after ${UPLOAD_MAX_ATTEMPTS} attempts."
+    exit 1
+fi
 
 echo "=============================================================================="
 echo "DEPLOYMENT COMPLETED SUCCESSFULLY!"
