@@ -64,78 +64,76 @@ public sealed class EventIngestionService : IEventIngestionService
             return HandleExistingEvent(existingEvent, payloadHash, cleanIdempotencyKey);
         }
 
-        // 4. Atomic Event + OutboxMessage insertion inside a transaction
-        var now = _timeProvider.GetUtcNow();
-        var eventId = Guid.NewGuid();
-        var outboxId = Guid.NewGuid();
-
-        var newEvent = new Event(
-            id: eventId,
-            tenantId: tenantId,
-            eventType: request.EventType!.Trim(),
-            payloadJson: minifiedJson,
-            payloadHash: payloadHash,
-            idempotencyKey: cleanIdempotencyKey,
-            createdAtUtc: now,
-            status: EventStatus.Accepted);
-
-        var outboxMessage = new OutboxMessage(
-            id: outboxId,
-            eventId: eventId,
-            tenantId: tenantId,
-            messageType: request.EventType!.Trim(),
-            payloadJson: minifiedJson,
-            createdAtUtc: now,
-            status: OutboxStatus.Pending);
-
-        await using var transaction = await _dbContext.BeginTransactionAsync(cancellationToken);
-
-        try
+        // 4. Atomic Event + OutboxMessage insertion inside resilient transaction
+        return await _dbContext.ExecuteInTransactionAsync(async ct =>
         {
+            var now = _timeProvider.GetUtcNow();
+            var eventId = Guid.NewGuid();
+            var outboxId = Guid.NewGuid();
+
+            var newEvent = new Event(
+                id: eventId,
+                tenantId: tenantId,
+                eventType: request.EventType!.Trim(),
+                payloadJson: minifiedJson,
+                payloadHash: payloadHash,
+                idempotencyKey: cleanIdempotencyKey,
+                createdAtUtc: now,
+                status: EventStatus.Accepted);
+
+            var outboxMessage = new OutboxMessage(
+                id: outboxId,
+                eventId: eventId,
+                tenantId: tenantId,
+                messageType: request.EventType!.Trim(),
+                payloadJson: minifiedJson,
+                createdAtUtc: now,
+                status: OutboxStatus.Pending);
+
             _dbContext.Events.Add(newEvent);
             _dbContext.OutboxMessages.Add(outboxMessage);
 
-            await _dbContext.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
-
-            _logger.LogInformation(
-                "Ingested event {EventId} for tenant {TenantId} with idempotency key {IdempotencyKey}",
-                eventId,
-                tenantId,
-                cleanIdempotencyKey);
-
-            return new IngestEventResult(
-                new IngestEventResponse(newEvent.Id, newEvent.Status.ToString(), newEvent.CreatedAtUtc),
-                IsReplay: false);
-        }
-        catch (DbUpdateException dbEx)
-        {
-            _logger.LogWarning(
-                dbEx,
-                "Concurrent submission or database conflict detected for tenant {TenantId} and key {IdempotencyKey}",
-                tenantId,
-                cleanIdempotencyKey);
-
-            await transaction.RollbackAsync(cancellationToken);
-
-            // Detach pending entries to clear EF change tracker state
-            DetachEntity(newEvent);
-            DetachEntity(outboxMessage);
-
-            // Resolve existing event committed by concurrent winner
-            var concurrentEvent = await _dbContext.Events
-                .AsNoTracking()
-                .FirstOrDefaultAsync(
-                    e => e.TenantId == tenantId && e.IdempotencyKey == cleanIdempotencyKey,
-                    cancellationToken);
-
-            if (concurrentEvent is not null)
+            try
             {
-                return HandleExistingEvent(concurrentEvent, payloadHash, cleanIdempotencyKey);
-            }
+                await _dbContext.SaveChangesAsync(ct);
 
-            throw;
-        }
+                _logger.LogInformation(
+                    "Ingested event {EventId} for tenant {TenantId} with idempotency key {IdempotencyKey}",
+                    eventId,
+                    tenantId,
+                    cleanIdempotencyKey);
+
+                return new IngestEventResult(
+                    new IngestEventResponse(newEvent.Id, newEvent.Status.ToString(), newEvent.CreatedAtUtc),
+                    IsReplay: false);
+            }
+            catch (DbUpdateException dbEx)
+            {
+                _logger.LogWarning(
+                    dbEx,
+                    "Database unique constraint conflict detected for tenant {TenantId} and key {IdempotencyKey}",
+                    tenantId,
+                    cleanIdempotencyKey);
+
+                // Detach entries to clear EF change tracker state
+                DetachEntity(newEvent);
+                DetachEntity(outboxMessage);
+
+                // Resolve concurrent winning event
+                var concurrentEvent = await _dbContext.Events
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(
+                        e => e.TenantId == tenantId && e.IdempotencyKey == cleanIdempotencyKey,
+                        ct);
+
+                if (concurrentEvent is not null)
+                {
+                    return HandleExistingEvent(concurrentEvent, payloadHash, cleanIdempotencyKey);
+                }
+
+                throw;
+            }
+        }, cancellationToken);
     }
 
     private IngestEventResult HandleExistingEvent(Event existing, string computedHash, string idempotencyKey)

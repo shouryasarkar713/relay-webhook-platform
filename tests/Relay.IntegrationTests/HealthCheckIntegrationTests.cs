@@ -8,7 +8,7 @@ using Xunit;
 namespace Relay.IntegrationTests;
 
 [Collection("DatabaseCollection")]
-public sealed class HealthCheckIntegrationTests : IClassFixture<RelayApiFactory>
+public sealed class HealthCheckIntegrationTests 
 {
     private readonly HttpClient _client;
 

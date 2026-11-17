@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using Relay.Application.Abstractions;
 using Relay.Domain.Entities;
 using Relay.Infrastructure;
@@ -29,10 +28,9 @@ public class RelayApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 
     private readonly string _connectionString;
 
-    public RelayApiFactory(string? connectionString = null)
+    public RelayApiFactory()
     {
-        _connectionString = connectionString
-            ?? Environment.GetEnvironmentVariable("RELAY_TEST_CONNECTION_STRING")
+        _connectionString = Environment.GetEnvironmentVariable("RELAY_TEST_CONNECTION_STRING")
             ?? "Server=localhost,1433;Database=RelayTestDb;User Id=sa;Password=Your_Strong_Password123!;TrustServerCertificate=True;MultipleActiveResultSets=True;";
     }
 
@@ -42,7 +40,7 @@ public class RelayApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         builder.UseEnvironment("Testing");
 
-        builder.ConfigureAppConfiguration((context, config) =>
+        builder.ConfigureAppConfiguration((_, config) =>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -81,7 +79,7 @@ public class RelayApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         await ResetAndSeedDataAsync(db, hasher, timeProvider);
     }
 
-    public async Task ResetAndSeedDataAsync(RelayDbContext db, IApiKeyHasher hasher, TimeProvider timeProvider)
+    public static async Task ResetAndSeedDataAsync(RelayDbContext db, IApiKeyHasher hasher, TimeProvider timeProvider)
     {
         var now = timeProvider.GetUtcNow();
 

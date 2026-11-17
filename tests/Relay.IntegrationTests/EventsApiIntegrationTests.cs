@@ -13,7 +13,7 @@ using Xunit;
 namespace Relay.IntegrationTests;
 
 [Collection("DatabaseCollection")]
-public sealed class EventsApiIntegrationTests : IClassFixture<RelayApiFactory>
+public sealed class EventsApiIntegrationTests 
 {
     private readonly RelayApiFactory _factory;
     private readonly HttpClient _client;

@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Relay.Application.Abstractions;
 using Relay.Domain.Entities;
-using Relay.Infrastructure.Transactions;
 
 namespace Relay.Infrastructure;
 
@@ -14,10 +13,18 @@ public sealed class RelayDbContext : DbContext, IRelayDbContext
     public DbSet<Event> Events => Set<Event>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
-    public async Task<IDbTransactionContext> BeginTransactionAsync(CancellationToken cancellationToken = default)
+    public async Task<T> ExecuteInTransactionAsync<T>(
+        Func<CancellationToken, Task<T>> operation,
+        CancellationToken cancellationToken = default)
     {
-        var tx = await Database.BeginTransactionAsync(cancellationToken);
-        return new EfTransactionContext(tx);
+        var strategy = Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await Database.BeginTransactionAsync(cancellationToken);
+            var result = await operation(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return result;
+        });
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
