@@ -30,65 +30,67 @@ This document provides a subscription-aware, verified cost reconciliation for de
 - **Allocations**:
   - `ca-relay-api`: 0.5 vCPU, 1.0 GiB memory. Ingress external.
   - `ca-relay-worker`: 0.5 vCPU, 1.0 GiB memory. Ingress disabled.
-- **Worker Scaling Invariant**: The worker requires `minReplicas = 1` because its SQL polling loop must remain active even when the Service Bus queue is empty. (Service Bus queue depth triggers autoscale for fan-out processing, but does not measure the SQL webhook delivery backlog).
-- **Pricing Structure**: Active replicas are billed per-second for allocated vCPU and GiB.
-  - Active vCPU: ~$0.000024/vCPU-sec (~$0.0216/hr for 0.5 vCPU).
-  - Active Memory: ~$0.000003/GiB-sec (~$0.0054/hr for 1.0 GiB).
-  - Combined 2 replicas (API + Worker): ~$0.054/hour = ~$38.88/month.
-  - Monthly Free Grant: Azure provides 180,000 vCPU-seconds (~50 vCPU-hours) and 360,000 GiB-seconds free per subscription each month, deducting ~$2.16/month.
-  - Net 24/7 ACA Cost: **~$36.72/month**.
+- **Combined Active Footprint (2 Replicas Minimum)**:
+  - Total allocated compute: 1.0 vCPU and 2.0 GiB memory.
+  - Active vCPU rate (Central India): $0.000024 / vCPU-sec ($0.0864 / hour for 1.0 vCPU).
+  - Active Memory rate (Central India): $0.000003 / GiB-sec ($0.0216 / hour for 2.0 GiB).
+  - Combined active rate: **$0.108 / hour** ($77.76 gross per 720-hour month).
+  - Monthly Subscription Free Grant: Azure provides 180,000 vCPU-seconds and 360,000 GiB-seconds free per subscription each month (valued at $5.40 total).
+  - Conservative net 24/7 active compute cost: **$72.36 / month** (720 hrs) or **$74.95 / month** (744 hrs).
+- **Idle Qualification**:
+  - When replicas receive no incoming requests and CPU/network usage drops below Azure's idle detection thresholds, compute drops to idle pricing ($0.000005 / vCPU-sec and $0.0000005 / GiB-sec = $0.0216 / hour).
+  - Net 24/7 idle compute cost: **$14.47 / month** (720 hrs) or **$14.99 / month** (744 hrs).
+  - *Note:* Relay.Worker periodically polls SQL for Outbox messages; actual continuous 24/7 cost will land between the idle rate ($14.47) and the active rate ($72.36).
 
 ---
 
-## 3. Cost Reconciliation: Three Deployment Scenarios
+## 3. Cost Reconciliation: Realistic Deployment Scenarios
 
 All figures reflect Central India region list pricing (exclusive of applicable local GST/taxes).
 
-### Scenario A — One-Hour Test Deployment (Smoke Test & Evaluation)
-*Assumes all resources are provisioned, full 10-step smoke test suite is executed, and resource group is torn down after 60 minutes:*
-
-| Resource | Provisioned SKU | Billing Model | Hourly Rate | 1-Hour Test Cost (USD) | 1-Hour Test Cost (INR) |
-| :--- | :--- | :--- | :---: | :---: | :---: |
-| **Azure Container Apps** | 2 × (0.5 vCPU, 1 GiB) | Per-second consumption | ~$0.0540/hr | $0.054 | ~₹4.50 |
-| **Azure SQL Database** | Basic (5 DTU, 2 GB) | Hourly granularity minimum | ~$0.0068/hr | $0.007 | ~₹0.60 |
-| **Azure Service Bus** | Standard Tier | Hourly base charge | ~$0.0135/hr | $0.014 | ~₹1.15 |
-| **Azure Container Registry**| Basic (10 GB) | Daily rate prorated | ~$0.1670/day | $0.167 | ~₹13.90 |
-| **Azure Storage (Keys & Web)**| Standard Hot LRS (2 accounts)| Storage & operations | Negligible | $0.010 | ~₹0.85 |
-| **Azure Key Vault** | Standard Tier | Key cryptographic operations| Negligible | $0.005 | ~₹0.40 |
-| **Azure Monitor** | Log Analytics & App Insights | First 5 GB/mo free | Free Tier | $0.000 | ₹0.00 |
-| **Egress Bandwidth** | Outbound HTTPS | First 100 GB/mo free | Free Tier | $0.000 | ₹0.00 |
-| **Total Scenario A** | | | | **~$0.26 USD** | **~₹22 INR** |
-
----
-
-### Scenario B — Continuous Demonstration Environment (30 Days, 24/7)
-*Assumes both API and Worker run continuously for 720 hours, with Service Bus, SQL Basic, and monitoring active:*
+### Scenario A — Conservative 24/7 Continuous Deployment (30 Days / 720 Hours)
+*Assumes both API and Worker run 24/7 at active rates without scaling to zero:*
 
 | Resource | Provisioned SKU | Billing Metric | Monthly Cost (USD) | Monthly Cost (INR) |
 | :--- | :--- | :--- | :---: | :---: |
-| **Azure Container Apps** | 2 replicas continuously active | 720 hrs compute minus free grant | ~$36.72 | ~₹3,050 |
+| **Azure Container Apps** | 2 replicas continuously active | 720 hrs active minus free grant | ~$72.36 | ~₹6,030 |
 | **Azure SQL Database** | Basic (5 DTU, 2 GB) | 720 hrs continuous availability | ~$4.99 | ~₹415 |
-| **Azure Service Bus** | Standard Tier | Base charge + < 1M operations | ~$10.05 | ~₹835 |
-| **Azure Container Registry**| Basic SKU | 30 days image storage | ~$5.00 | ~₹415 |
-| **Azure Storage (Keys)** | Blob Storage (Data Protection) | < 100 MB XML key ring + operations | ~$0.15 | ~₹12 |
-| **Azure Storage (Static Web)**| Blob Storage ($web) | React 19 static bundle | ~$0.15 | ~₹12 |
-| **Azure Key Vault** | Standard Tier | RSA 2048 key unwrap operations | ~$0.10 | ~₹8 |
-| **Azure Monitor** | Log Analytics + App Insights | < 2 GB/month (within 5 GB free) | $0.00 | ₹0 |
-| **Total Scenario B** | | | **~$57.16 USD / month** | **~₹4,750 INR / month** |
+| **Azure Service Bus** | Standard Tier | Base charge ($0.0135/hr × 720) + ops | ~$9.72 | ~₹810 |
+| **Azure Container Registry**| Basic SKU | 30 days image storage ($0.167/day) | ~$5.01 | ~₹417 |
+| **Azure Storage (Keys & Web)**| Standard Hot LRS (2 accounts)| < 1 GB + operations | ~$0.10 | ~₹8 |
+| **Azure Key Vault** | Standard Tier | Key cryptographic operations | ~$0.05 | ~₹4 |
+| **Azure Monitor** | Log Analytics + App Insights | First 5 GB/mo free grant | $0.00 | ₹0 |
+| **Total Scenario A** | | | **~$92.23 USD / month** | **~₹7,684 INR / month** |
+
+*Note: In a 31-day month (744 hours), total increases to **~$95.44 USD**.*
 
 ---
 
-### Scenario C — Intermittent Demonstration Environment (On-Demand Usage)
-*Assumes ACR and Storage are maintained between demos ($5.30/mo), and compute/broker/SQL are spun up 30 minutes before evaluations and torn down afterwards (e.g., 5 demonstration sessions × 2 hours = 10 active hours/month):*
+### Scenario B — 24/7 Continuous Deployment with Idle Qualifications (30 Days / 720 Hours)
+*Assumes replicas qualify for idle pricing during periods of zero traffic:*
 
-| Resource Component | Active Duration / Billing | Monthly Cost (USD) | Monthly Cost (INR) |
+| Resource | Provisioned SKU | Billing Metric | Monthly Cost (USD) | Monthly Cost (INR) |
+| :--- | :--- | :--- | :---: | :---: |
+| **Azure Container Apps** | 2 replicas at idle rates | 720 hrs idle minus free grant | ~$14.47 | ~₹1,205 |
+| **Azure SQL Database** | Basic (5 DTU, 2 GB) | 720 hrs continuous availability | ~$4.99 | ~₹415 |
+| **Azure Service Bus** | Standard Tier | Base charge ($0.0135/hr × 720) | ~$9.72 | ~₹810 |
+| **Azure Container Registry**| Basic SKU | 30 days image storage | ~$5.01 | ~₹417 |
+| **Azure Storage & Key Vault**| Blob & Key Vault Standard | Operational storage & crypto | ~$0.15 | ~₹12 |
+| **Total Scenario B** | | | **~$34.34 USD / month** | **~₹2,859 INR / month** |
+
+---
+
+### Scenario C — Intermittent 10-Hour Evaluation Session (Recommended FinOps Policy)
+*Assumes the platform is provisioned for a 10-hour evaluation session and immediately torn down using `teardown.sh`:*
+
+| Resource Component | Duration / Billing Basis | Session Cost (USD) | Session Cost (INR) |
 | :--- | :--- | :---: | :---: |
-| **Container Apps (API + Worker)** | 10 active hours compute | ~$0.54 | ~₹45 |
-| **Azure SQL Database** | 10 active hours (Basic 5 DTU) | ~$0.07 | ~₹6 |
-| **Azure Service Bus** | 10 active hours base charge | ~$0.14 | ~₹12 |
-| **ACR & Storage Accounts** | Persisted across 30 days | ~$5.30 | ~₹440 |
-| **Azure Monitor & Key Vault** | Operational telemetry | ~$0.05 | ~₹4 |
-| **Total Scenario C** | | **~$6.10 USD / month** | **~₹507 INR / month** |
+| **Container Apps (API + Worker)** | 10 hours (36,000 vCPU-s < 180,000 free grant) | $0.00 | ₹0.00 |
+| **Azure SQL Database** | 10 active hours ($0.00693/hr × 10) | $0.07 | ~₹6.00 |
+| **Azure Service Bus** | 10 active hours base charge ($0.0135/hr × 10) | $0.14 | ~₹11.50 |
+| **Azure Container Registry**| Basic SKU (1 full billing day minimum) | $0.17 | ~₹14.00 |
+| **Storage & Key Vault** | Operational telemetry & secrets | < $0.01 | ~₹0.50 |
+| **Total Scenario C** | **10-Hour Complete Demo Session** | **~$0.39 USD** | **~₹32.00 INR** |
 
 ---
 

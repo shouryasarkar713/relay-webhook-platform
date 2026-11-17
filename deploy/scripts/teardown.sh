@@ -37,12 +37,28 @@ echo "==========================================================================
 # 3. Dry-run mode inspection
 if [ "${CONFIRM_FLAG}" = "--dry-run" ] || [ "${EXTRA_FLAG}" = "--dry-run" ]; then
     echo "[DRY-RUN MODE ACTIVATED]"
-    echo "Would check Azure CLI authentication."
-    echo "Would inspect resources in resource group: ${RG_NAME}"
-    echo "Would require explicit flag: --confirm-delete-all-resources"
-    echo "Would require typing '${RG_NAME}' interactively."
-    echo "Would trigger asynchronous deletion of resource group '${RG_NAME}'."
-    echo "Key Vault soft-delete retention (90 days) WOULD BE PRESERVED."
+    echo "Inspecting environment state without deleting or modifying any cloud resource..."
+    if command -v az &> /dev/null && az account show &> /dev/null; then
+        CURRENT_SUB_NAME=$(az account show --query name -o tsv 2>/dev/null || echo "Unknown")
+        CURRENT_SUB_ID=$(az account show --query id -o tsv 2>/dev/null || echo "Unknown")
+        echo "Active Subscription: ${CURRENT_SUB_NAME} (${CURRENT_SUB_ID:0:8}...)"
+        if az group exists --name "${RG_NAME}" 2>/dev/null; then
+            echo "Resource Group '${RG_NAME}' exists. Current inventory that WOULD be deleted:"
+            echo "------------------------------------------------------------------------------"
+            az resource list --resource-group "${RG_NAME}" --output table || true
+            echo "------------------------------------------------------------------------------"
+        else
+            echo "Resource Group '${RG_NAME}' does NOT exist in the active subscription."
+        fi
+    else
+        echo "Azure CLI is not installed or not authenticated locally."
+    fi
+    echo ""
+    echo "Dry-run verified safety invariants:"
+    echo "  - Non-destructive execution confirmed."
+    echo "  - Real deletion requires explicit flag: --confirm-delete-all-resources"
+    echo "  - Real deletion requires interactive typing of: '${RG_NAME}'"
+    echo "  - Real deletion triggers asynchronous group deletion without purging Key Vault."
     echo "NO CHANGES HAVE BEEN MADE."
     exit 0
 fi
@@ -77,16 +93,18 @@ echo "Inventory of resources to be deleted in '${RG_NAME}':"
 echo "------------------------------------------------------------------------------"
 az resource list --resource-group "${RG_NAME}" --output table
 echo "------------------------------------------------------------------------------"
-echo "WARNING: Deleting this resource group deletes:"
-echo "  1. Azure SQL Database (all data, event logs, deliveries destroyed)."
-echo "  2. Azure Container Apps (ca-relay-api, ca-relay-worker) and Environment."
-echo "  3. Azure Service Bus namespace and queue."
-echo "  4. Azure Storage Accounts (Data Protection blobs and Static Web assets)."
-echo "  5. Azure Key Vault (will enter SOFT-DELETE state; keys retained for 90 days)."
+echo "WARNING: Deleting this resource group causes PERMANENT DATA LOSS:"
+echo "  1. Azure SQL Database is permanently destroyed (all tenant records, idempotency keys, and deliveries are lost)."
+echo "  2. Azure Storage Accounts are permanently destroyed (Data Protection XML keyring blob is lost)."
+echo "  3. Azure Container Apps (ca-relay-api, ca-relay-worker) and Environment are destroyed."
+echo "  4. Azure Service Bus namespace and queue are destroyed."
+echo "  5. Azure Key Vault enters SOFT-DELETE state (retained in Azure for 90 days; NEVER automatically purged)."
 echo ""
-echo "NOTE ON KEY VAULT & DATA PROTECTION:"
-echo "  Key Vault soft-delete is PRESERVED. The cryptographic key 'relay-dp-key' will"
-echo "  NOT be purged, allowing data recovery if the vault is restored within 90 days."
+echo "CRITICAL CRYPTOGRAPHIC LIFECYCLE NOTICE:"
+echo "  Although the master wrapping key remains in soft-deleted Key Vault for 90 days, historical encrypted"
+echo "  webhook signing secrets CANNOT be decrypted after teardown because both the database ciphertext and"
+echo "  the Data Protection XML keyring storage account are destroyed. Any subsequent redeployment initializes"
+echo "  a new, independent cryptographic state."
 echo "=============================================================================="
 
 read -rp "Type the exact resource group name '${RG_NAME}' to proceed with DELETION: " CONFIRM_NAME

@@ -62,10 +62,20 @@ dotnet run --project src/Relay.Admin -- apikey revoke <keyId>
 ```
 
 ### 3.4 Applying Database Schema Migrations
-Database migrations are applied deterministically via `relay-admin`:
+Database schema migrations are executed securely inside Azure Container Apps using the dedicated migration job (`job-relay-migration`) under the least-privileged migration identity (`id-relay-migration`):
 ```bash
-dotnet run --project src/Relay.Admin -- migrate
+# Trigger the Container Apps migration job
+az containerapp job start \
+  --name job-relay-migration \
+  --resource-group rg-relay-prod
+
+# Verify successful execution status
+az containerapp job execution list \
+  --name job-relay-migration \
+  --resource-group rg-relay-prod \
+  --output table
 ```
+*Note: In local development or during automated CI testing, schema migrations are applied against local SQL Server containers using `dotnet run --project src/Relay.Admin -- migrate`.*
 
 ---
 

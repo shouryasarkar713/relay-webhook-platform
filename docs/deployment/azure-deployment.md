@@ -102,22 +102,32 @@ podman push "${ACR_SERVER}/relay-admin:${IMAGE_TAG}"
 
 ---
 
-### Step 6: Bootstrap Database Users & Execute Schema Migration
-Connect as the Entra SQL Administrator to bootstrap runtime Managed Identity users and apply migrations:
+### Step 6: Bootstrap Database Users & Execute Schema Migration via Container Apps Job
+Connect as the Entra SQL Administrator to bootstrap runtime Managed Identity users, then execute the schema migration using the dedicated Azure Container Apps migration job:
 ```bash
 export ConnectionStrings__RelayDatabase="Server=tcp:${SQL_SERVER},1433;Database=${SQL_DB};Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;"
 
-# 1. Provision external database users for id-relay-api, id-relay-worker, and id-relay-migration:
+# 1. Provision external database users for id-relay-api, id-relay-worker, and id-relay-migration (as Entra SQL Admin):
 dotnet run --project src/Relay.Admin/Relay.Admin.csproj -- bootstrap-users
 
-# 2. Apply Entity Framework Core schema migrations:
-dotnet run --project src/Relay.Admin/Relay.Admin.csproj -- migrate
-```
+# 2. Update Container Apps Migration Job to the newly pushed ACR image:
+az containerapp job update \
+  --name "${MIGRATION_JOB_NAME}" \
+  --resource-group "${RESOURCE_GROUP}" \
+  --image "${ACR_SERVER}/relay-admin:${IMAGE_TAG}"
 
-Alternatively, run the migration via the one-shot Container Apps Job using `id-relay-migration`:
-```bash
-az containerapp job start --name "${MIGRATION_JOB_NAME}" --resource-group "${RESOURCE_GROUP}"
+# 3. Trigger one-shot schema migration inside ACA under id-relay-migration (db_owner):
+az containerapp job start \
+  --name "${MIGRATION_JOB_NAME}" \
+  --resource-group "${RESOURCE_GROUP}"
+
+# 4. Verify migration job execution completed successfully:
+az containerapp job execution list \
+  --name "${MIGRATION_JOB_NAME}" \
+  --resource-group "${RESOURCE_GROUP}" \
+  --output table
 ```
+> **Security Invariant:** The runtime application identities (`id-relay-api` and `id-relay-worker`) are granted only `db_datareader` and `db_datawriter`. DDL privileges (`db_owner`) are granted strictly to `id-relay-migration`, which runs only inside the ephemeral `job-relay-migration` container. Local operators never perform DDL directly in production.
 
 ---
 
