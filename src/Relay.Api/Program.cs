@@ -1,3 +1,4 @@
+using Azure.Monitor.OpenTelemetry.AspNetCore;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
 using Relay.Api.Authentication;
@@ -9,6 +10,18 @@ using Relay.Infrastructure;
 using Relay.Infrastructure.Data;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Azure Monitor / OpenTelemetry when connection string is provided
+var appInsightsConnection = builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]
+    ?? builder.Configuration["AzureMonitor:ConnectionString"];
+
+if (!string.IsNullOrWhiteSpace(appInsightsConnection))
+{
+    builder.Services.AddOpenTelemetry().UseAzureMonitor(options =>
+    {
+        options.ConnectionString = appInsightsConnection;
+    });
+}
 
 // Add application and infrastructure layers
 builder.Services.AddApplication();
@@ -76,13 +89,14 @@ if (app.Environment.IsDevelopment())
     {
         if (dbContext.Database.CanConnect())
         {
+            var configuredDevSecret = app.Configuration["Relay:DevelopmentApiKeySecret"];
             var (_, devKey) = await DbInitializer.EnsureDevelopmentTenantSeededAsync(
                 dbContext, hasher, timeProvider, logger,
-                specifiedDevSecret: "7f3a9e2b4c810d9e8f1234567890abcdef1234567890abcdef1234567890abcdef");
+                specifiedDevSecret: configuredDevSecret);
 
             if (devKey is not null)
             {
-                logger.LogInformation("DEVELOPMENT API KEY: {DevKey}", devKey);
+                logger.LogInformation("DEVELOPMENT API KEY GENERATED/SEEDED: {DevKey}", devKey);
             }
         }
     }
@@ -102,4 +116,7 @@ app.MapControllers();
 app.Run();
 
 // Required for WebApplicationFactory in integration tests
-public partial class Program { }
+namespace Relay.Api
+{
+    public partial class Program { }
+}

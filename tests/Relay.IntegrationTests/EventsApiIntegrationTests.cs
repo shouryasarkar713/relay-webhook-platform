@@ -167,7 +167,8 @@ public sealed class EventsApiIntegrationTests
         persistedOutbox!.TenantId.Should().Be(Guid.Parse(RelayApiFactory.TenantAId));
         persistedOutbox.MessageType.Should().Be("payment.captured");
         persistedOutbox.Status.Should().Be(OutboxStatus.Pending);
-        persistedOutbox.AttemptCount.Should().Be(0);
+        persistedOutbox.ClaimCount.Should().Be(0);
+        persistedOutbox.PublishAttemptCount.Should().Be(0);
         persistedOutbox.PublishedAtUtc.Should().BeNull();
     }
 

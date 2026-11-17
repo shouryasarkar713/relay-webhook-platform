@@ -33,8 +33,13 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
         builder.Property(o => o.PublishedAtUtc)
             .IsRequired(false);
 
-        builder.Property(o => o.AttemptCount)
-            .IsRequired();
+        builder.Property(o => o.ClaimCount)
+            .IsRequired()
+            .HasDefaultValue(0);
+
+        builder.Property(o => o.PublishAttemptCount)
+            .IsRequired()
+            .HasDefaultValue(0);
 
         builder.Property(o => o.LastError)
             .IsRequired(false)
@@ -45,12 +50,27 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
             .HasConversion<string>()
             .HasMaxLength(32);
 
+        builder.Property(o => o.LeaseToken)
+            .IsRequired(false);
+
+        builder.Property(o => o.LeaseExpiresAtUtc)
+            .IsRequired(false);
+
+        builder.Property(o => o.NextAttemptAtUtc)
+            .IsRequired();
+
+        builder.Property(o => o.LastAttemptAtUtc)
+            .IsRequired(false);
+
         builder.HasOne(o => o.Event)
             .WithOne(e => e.OutboxMessage)
             .HasForeignKey<OutboxMessage>(o => o.EventId)
             .OnDelete(DeleteBehavior.Cascade);
 
-        // Core Requirement 3: Compound index for outbox polling
+        // Indices for outbox polling, lease expiration, and dispatch queries
+        builder.HasIndex(o => new { o.Status, o.NextAttemptAtUtc });
+        builder.HasIndex(o => new { o.Status, o.LeaseExpiresAtUtc });
+        builder.HasIndex(o => o.LeaseToken);
         builder.HasIndex(o => new { o.Status, o.CreatedAtUtc });
 
         builder.HasIndex(o => o.TenantId);

@@ -23,6 +23,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Relay.Api\Relay.Api.csproj" />
     <ProjectReference Include="..\..\src\Relay.Infrastructure\Relay.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Relay.Worker\Relay.Worker.csproj" />
   </ItemGroup>
 
 </Project>

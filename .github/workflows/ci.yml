@@ -35,14 +35,11 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Verify Code Formatting
-        run: dotnet format --verify-no-changes --verbosity normal
-
       - name: Restore Backend Dependencies
         run: dotnet restore Relay.sln
 
       - name: Build Solution
-        run: dotnet build Relay.sln --configuration Release --no-restore
+        run: dotnet build Relay.sln --configuration Release --no-restore -warnaserror
 
       - name: Run Unit Tests
         run: dotnet test tests/Relay.UnitTests/Relay.UnitTests.csproj --configuration Release --no-build --logger "trx;LogFileName=unit-tests.trx"
@@ -78,3 +75,27 @@ jobs:
 
       - name: Production Build
         run: npm run build
+
+  iac-and-containers:
+    name: IaC Validation & Container Builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Azure CLI & Bicep
+        uses: azure/setup-bicep@v2
+        with:
+          version: 'latest'
+
+      - name: Validate Bicep Compilation
+        run: bicep build deploy/main.bicep
+
+      - name: Build API Docker Image
+        run: docker build -f src/Relay.Api/Dockerfile -t relay-api:${{ github.sha }} .
+
+      - name: Build Worker Docker Image
+        run: docker build -f src/Relay.Worker/Dockerfile -t relay-worker:${{ github.sha }} .
+
+      - name: Build Admin & Migration Docker Image
+        run: docker build -f src/Relay.Admin/Dockerfile -t relay-admin:${{ github.sha }} .

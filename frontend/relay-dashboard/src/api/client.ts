@@ -4,7 +4,12 @@ import type {
   EventDto,
   PagedResult,
   ProblemDetails,
-  HealthStatus
+  HealthStatus,
+  WebhookEndpointResponse,
+  CreateWebhookEndpointRequest,
+  UpdateWebhookEndpointRequest,
+  WebhookDeliveryDto,
+  ReplayDeliveryResponse
 } from '../types/api';
 
 export class ApiError extends Error {
@@ -132,6 +137,181 @@ export class RelayApiClient {
           title: 'Error loading events',
           detail: response.statusText
         };
+      }
+      throw new ApiError(response.status, problem);
+    }
+
+    return response.json();
+  }
+
+  public async listEndpoints(apiKey: string): Promise<WebhookEndpointResponse[]> {
+    const response = await fetch(`${this.baseUrl}/v1/endpoints`, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      let problem: ProblemDetails;
+      try {
+        problem = await response.json();
+      } catch {
+        problem = { status: response.status, title: 'Error loading endpoints', detail: response.statusText };
+      }
+      throw new ApiError(response.status, problem);
+    }
+
+    return response.json();
+  }
+
+  public async createEndpoint(apiKey: string, request: CreateWebhookEndpointRequest): Promise<WebhookEndpointResponse> {
+    const response = await fetch(`${this.baseUrl}/v1/endpoints`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey,
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(request)
+    });
+
+    if (!response.ok) {
+      let problem: ProblemDetails;
+      try {
+        problem = await response.json();
+      } catch {
+        problem = { status: response.status, title: 'Failed to create endpoint', detail: response.statusText };
+      }
+      throw new ApiError(response.status, problem);
+    }
+
+    return response.json();
+  }
+
+  public async updateEndpoint(apiKey: string, id: string, request: UpdateWebhookEndpointRequest): Promise<WebhookEndpointResponse> {
+    const response = await fetch(`${this.baseUrl}/v1/endpoints/${id}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': apiKey,
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(request)
+    });
+
+    if (!response.ok) {
+      let problem: ProblemDetails;
+      try {
+        problem = await response.json();
+      } catch {
+        problem = { status: response.status, title: 'Failed to update endpoint', detail: response.statusText };
+      }
+      throw new ApiError(response.status, problem);
+    }
+
+    return response.json();
+  }
+
+  public async deleteEndpoint(apiKey: string, id: string): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/v1/endpoints/${id}`, {
+      method: 'DELETE',
+      headers: {
+        'X-Api-Key': apiKey
+      }
+    });
+
+    if (!response.ok) {
+      let problem: ProblemDetails;
+      try {
+        problem = await response.json();
+      } catch {
+        problem = { status: response.status, title: 'Failed to delete endpoint', detail: response.statusText };
+      }
+      throw new ApiError(response.status, problem);
+    }
+  }
+
+  public async listDeliveries(
+    apiKey: string,
+    params?: { status?: string; endpointId?: string; eventType?: string; page?: number; pageSize?: number }
+  ): Promise<PagedResult<WebhookDeliveryDto>> {
+    const query = new URLSearchParams();
+    if (params?.status) query.set('status', params.status);
+    if (params?.endpointId) query.set('endpointId', params.endpointId);
+    if (params?.eventType) query.set('eventType', params.eventType);
+    if (params?.page) query.set('page', params.page.toString());
+    if (params?.pageSize) query.set('pageSize', params.pageSize.toString());
+
+    const queryString = query.toString() ? `?${query.toString()}` : '';
+    const response = await fetch(`${this.baseUrl}/v1/deliveries${queryString}`, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      let problem: ProblemDetails;
+      try {
+        problem = await response.json();
+      } catch {
+        problem = { status: response.status, title: 'Error loading deliveries', detail: response.statusText };
+      }
+      throw new ApiError(response.status, problem);
+    }
+
+    return response.json();
+  }
+
+  public async getDelivery(apiKey: string, id: string): Promise<WebhookDeliveryDto> {
+    const response = await fetch(`${this.baseUrl}/v1/deliveries/${id}`, {
+      method: 'GET',
+      headers: {
+        'X-Api-Key': apiKey,
+        'Accept': 'application/json'
+      }
+    });
+
+    if (!response.ok) {
+      let problem: ProblemDetails;
+      try {
+        problem = await response.json();
+      } catch {
+        problem = { status: response.status, title: 'Delivery not found', detail: response.statusText };
+      }
+      throw new ApiError(response.status, problem);
+    }
+
+    return response.json();
+  }
+
+  public async replayDelivery(
+    apiKey: string,
+    id: string,
+    idempotencyKey?: string
+  ): Promise<ReplayDeliveryResponse> {
+    const headers: Record<string, string> = {
+      'X-Api-Key': apiKey,
+      'Accept': 'application/json'
+    };
+    if (idempotencyKey) {
+      headers['Idempotency-Key'] = idempotencyKey;
+    }
+
+    const response = await fetch(`${this.baseUrl}/v1/deliveries/${id}/replay`, {
+      method: 'POST',
+      headers
+    });
+
+    if (!response.ok) {
+      let problem: ProblemDetails;
+      try {
+        problem = await response.json();
+      } catch {
+        problem = { status: response.status, title: 'Replay request failed', detail: response.statusText };
       }
       throw new ApiError(response.status, problem);
     }

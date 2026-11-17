@@ -9,6 +9,12 @@ public interface IRelayDbContext
     DbSet<ApiKey> ApiKeys { get; }
     DbSet<Event> Events { get; }
     DbSet<OutboxMessage> OutboxMessages { get; }
+    DbSet<WebhookEndpoint> WebhookEndpoints { get; }
+    DbSet<WebhookEndpointSubscription> WebhookEndpointSubscriptions { get; }
+    DbSet<WebhookEventFanout> WebhookEventFanouts { get; }
+    DbSet<WebhookDelivery> WebhookDeliveries { get; }
+    DbSet<WebhookDeliveryAttempt> WebhookDeliveryAttempts { get; }
+    DbSet<WebhookDeliveryReplayAudit> WebhookDeliveryReplayAudits { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 

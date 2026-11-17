@@ -18,12 +18,53 @@ public static class DbInitializer
         string? specifiedDevSecret = null,
         CancellationToken cancellationToken = default)
     {
+        // 1. Explicitly revoke the compromised historical dev key if present
+        var compromisedHistoricalKey = await dbContext.ApiKeys
+            .FirstOrDefaultAsync(k => k.KeyPrefix == "pk_dev001" && k.RevokedAtUtc == null, cancellationToken);
+        if (compromisedHistoricalKey is not null)
+        {
+            compromisedHistoricalKey.Revoke(timeProvider.GetUtcNow());
+            logger.LogWarning("Revoked compromised legacy development key prefix {Prefix}", "pk_dev001");
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
         var existingTenant = await dbContext.Tenants
             .Include(t => t.ApiKeys)
             .FirstOrDefaultAsync(t => t.Slug == DefaultDevTenantSlug, cancellationToken);
 
         if (existingTenant is not null)
         {
+            var activeKey = existingTenant.ApiKeys.FirstOrDefault(k => k.IsValid(timeProvider.GetUtcNow()));
+            if (activeKey is null)
+            {
+                // Generate a fresh key for the existing tenant
+                var newPrefix = $"pk_{Guid.NewGuid():N}"[..12];
+                string newRawKey;
+                string newKeyHash;
+                if (!string.IsNullOrWhiteSpace(specifiedDevSecret))
+                {
+                    newKeyHash = apiKeyHasher.HashSecret(specifiedDevSecret);
+                    newRawKey = $"rl_live_{newPrefix}_{specifiedDevSecret}";
+                }
+                else
+                {
+                    newKeyHash = apiKeyHasher.GenerateApiKey("live", newPrefix, out newRawKey);
+                }
+
+                var freshApiKey = new ApiKey(
+                    id: Guid.NewGuid(),
+                    tenantId: existingTenant.Id,
+                    name: "Fresh Dev Key",
+                    keyPrefix: newPrefix,
+                    keyHash: newKeyHash,
+                    createdAtUtc: timeProvider.GetUtcNow());
+
+                dbContext.ApiKeys.Add(freshApiKey);
+                await dbContext.SaveChangesAsync(cancellationToken);
+                logger.LogInformation("Generated fresh API key with prefix {Prefix} for existing tenant {Slug}", newPrefix, DefaultDevTenantSlug);
+                return (existingTenant, newRawKey);
+            }
+
             return (existingTenant, null);
         }
 

@@ -15,15 +15,16 @@ What architectural topology best balances clear separation of concerns, high thr
 
 ## 3. Decision
 
-We will structure Relay as a **Modular Monolith** for the synchronous REST API (`Relay.Api`) paired with an independent **Worker Service** (`Relay.Worker`) for asynchronous background processing:
+We will structure Relay as a **Modular Monolith** comprising two independent, runnable application hosts:
+- `Relay.Api`: ASP.NET Core web host providing the synchronous REST API, authentication, payload validation, and event ingestion.
+- `Relay.Worker`: Independent background process host executing durable outbox dispatching and delivery workflows.
 
+Both hosts share the same core application and domain abstractions:
 - `Relay.Domain`: Core domain models, value objects, and business rules without external dependencies.
 - `Relay.Application`: Application use cases, DTOs, interfaces, and pipeline behaviors.
 - `Relay.Infrastructure`: EF Core DbContext, database migrations, SQL Server persistence, and security hashing implementations.
-- `Relay.Api`: ASP.NET Core host, controllers, authentication handlers, OpenAPI specification, and health endpoints.
-- `Relay.Worker`: Background service host executing outbox dispatching and delivery workflows.
 
-Both projects share the same application and domain abstractions while retaining independent scalability profiles (e.g., API scaling with HTTP traffic, Worker scaling with outbox queue depth).
+The API and Worker are separate executable hosts sharing a single codebase, rather than two independently invented business microservices. They retain independent scalability profiles (e.g., API scaling with HTTP ingestion traffic, Worker scaling with outbox queue depth) while avoiding distributed transactions and duplicated logic.
 
 ## 4. Alternatives Considered
 

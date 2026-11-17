@@ -3,6 +3,7 @@ namespace Relay.Domain.Enums;
 public enum OutboxStatus
 {
     Pending = 1,
-    Published = 2,
-    Failed = 3
+    Processing = 2,
+    Published = 3,
+    Failed = 4
 }

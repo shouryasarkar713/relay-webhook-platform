@@ -75,33 +75,77 @@ Relay solves these issues by establishing a resilient, failure-oriented architec
 
 ```mermaid
 flowchart TD
-    subgraph Clients ["Producers & Developer UI"]
-        UI["React Developer Console\n(In-Memory Keys)"]
-        PROD["External API Producers\n(Backend Services / Microservices)"]
+    subgraph Clients ["Producers, Consumers & Dashboard"]
+        UI["React Developer Console\n(In-Memory Keys, Endpoints, Deliveries)"]
+        PROD["API Producers\n(Backend Services / Microservices)"]
+        DEST["Customer Webhook Receivers\n(External HTTP/HTTPS Endpoints)"]
     end
 
     subgraph API ["Relay.Api Host (ASP.NET Core 10)"]
         AUTH["ApiKey Authentication Scheme\n• Extract Prefix\n• FixedTimeEquals Verification\n• Establish ITenantContext"]
-        VAL["Request Validator & Fingerprint\n• SHA-256 Payload Hash\n• Max 32 KB Size Check\n• EventType & Idempotency-Key Format"]
-        CTRL["EventsController\nPOST /v1/events\nGET /v1/events/{id}\nGET /v1/events"]
+        VAL["Request Validator & SSRF Guard\n• SHA-256 Payload Hash\n• Max 32 KB Size Check\n• SSRF IP Validation on Endpoint URLs"]
+        E_CTRL["EventsController\nPOST /v1/events\nGET /v1/events/{id}"]
+        EP_CTRL["WebhookEndpointsController\nPOST /v1/endpoints (1-time secret)\nGET, PUT, DELETE /v1/endpoints"]
+        DELIV_CTRL["WebhookDeliveriesController\nGET /v1/deliveries\nGET /v1/deliveries/{id}"]
     end
 
-    subgraph AppCore ["Relay.Application Core"]
-        INGEST["EventIngestionService\n• Idempotency Match Logic\n• Atomic EF Core Transaction"]
-        QUERY["EventQueryService\n• Strict Tenant Scoping\n• Newest-First Pagination"]
+    subgraph Broker ["Azure Service Bus"]
+        ASB[("Queue: relay-events\nRequiresDuplicateDetection = true\nMessageId = EventId")]
+    end
+
+    subgraph WorkerHost ["Relay.Worker Host (.NET 10 Worker)"]
+        OUT_DISP["OutboxDispatcher Background Service\n• CTE Claim: UPDLOCK, READPAST, ROWLOCK\n• Optimistic Fencing via LeaseToken\n• Full-Jitter Exponential Backoff"]
+        FANOUT_CONS["EventFanoutConsumer Background Service\n• Service Bus PeekLock Receiver\n• DB Idempotency: WebhookEventFanout\n• Matches Active Subscriptions -> WebhookDeliveries"]
+        DELIV_DISP["WebhookDeliveryDispatcher Background Service\n• Batch Claiming with Fenced Leases\n• Data Protection Secret Decryption\n• Canonical JSON Envelope & HMAC-SHA256 Signing\n• Secure HTTP Client: SSRF Socket Pinning, No Redirects\n• Immutable WebhookDeliveryAttempts Logging"]
     end
 
     subgraph Storage ["SQL Server 2022 / Azure SQL"]
-        TX["Single ACID Database Transaction"]
-        T_EVT[("Events Table\nUNIQUE (TenantId, IdempotencyKey)\nINDEX (TenantId, CreatedAtUtc)")]
-        T_OUT[("OutboxMessages Table\nINDEX (Status, CreatedAtUtc)")]
-        T_KEY[("ApiKeys Table\nUNIQUE (KeyPrefix)")]
-        T_TEN[("Tenants Table\nUNIQUE (Slug)")]
+        T_EVT[("Events Table\nUNIQUE (TenantId, IdempotencyKey)")]
+        T_OUT[("OutboxMessages Table\nINDEX (Status, NextAttemptAtUtc)")]
+        T_EP[("WebhookEndpoints Table\nSigningSecretProtected (AES-256)")]
+        T_SUB[("WebhookEndpointSubscriptions Table\nINDEX (TenantId, EventType)")]
+        T_FAN[("WebhookEventFanouts Table\nUNIQUE (EventId)")]
+        T_DEL[("WebhookDeliveries Table\nUNIQUE (EventId, EndpointId)")]
+        T_ATT[("WebhookDeliveryAttempts Table\nFK (DeliveryId)")]
+        T_KEY[("ApiKeys Table")]
+        T_TEN[("Tenants Table")]
     end
 
-    subgraph Worker ["Relay.Worker (Future Phase 2)"]
-        DISP["Outbox Dispatcher"]
-        SB["Azure Service Bus"]
+    PROD -->|POST /v1/events| AUTH
+    UI -->|Manage Endpoints / Inspect Deliveries| AUTH
+    AUTH --> VAL
+    VAL --> E_CTRL
+    VAL --> EP_CTRL
+    VAL --> DELIV_CTRL
+
+    E_CTRL -->|Single ACID TX| T_EVT
+    E_CTRL -->|Single ACID TX| T_OUT
+    EP_CTRL --> T_EP
+    EP_CTRL --> T_SUB
+    DELIV_CTRL --> T_DEL
+
+    OUT_DISP -->|1. Fenced Lease Claim| T_OUT
+    OUT_DISP -->|2. Publish OutboxEnvelope| ASB
+    OUT_DISP -->|3. Mark Published / Retry| T_OUT
+
+    ASB -->|4. PeekLock Receive| FANOUT_CONS
+    FANOUT_CONS -->|5. Idempotent Fanout TX| T_FAN
+    FANOUT_CONS -->|5. Insert Pending Deliveries| T_DEL
+    FANOUT_CONS -->|6. Settle Message| ASB
+
+    DELIV_DISP -->|7. Claim Pending Deliveries| T_DEL
+    DELIV_DISP -->|8. Sign HMAC-SHA256 & Deliver| DEST
+    DELIV_DISP -->|9. Record Status & Attempt Log| T_DEL
+    DELIV_DISP -->|9. Insert Attempt Row| T_ATT
+```
+
+    subgraph Worker ["Relay.Worker Host (Background Dispatcher)"]
+        DISP["OutboxDispatcher\n• Atomic CTE Claim (UPDLOCK, READPAST)\n• Lease Token & Expiration\n• Bounded Concurrency (Parallel.ForEachAsync)\n• Capped Jitter Exponential Backoff"]
+        PUB["AzureServiceBusEventPublisher\n• IEventMessagePublisher Abstraction\n• Deterministic MessageId & CorrelationId\n• Native JSON Payload Envelope"]
+    end
+
+    subgraph Broker ["Azure Messaging"]
+        SB[("Azure Service Bus\nTopic / Queue: relay-events\nBroker Deduplication Window")]
     end
 
     PROD -->|"POST /v1/events\nX-Api-Key, Idempotency-Key"| CTRL
@@ -117,8 +161,10 @@ flowchart TD
     CTRL --> QUERY
     QUERY --> T_EVT
 
-    T_OUT -.->|"Phase 2 Dispatch"| DISP
-    DISP -.-> SB
+    DISP -->|"1. Atomic Lease Claim (SQL)"| T_OUT
+    DISP -->|"2. Network Publish (Outside SQL TX)"| PUB
+    PUB -->|"3. AMQP 1.0 Send"| SB
+    DISP -->|"4. Mark Published / Schedule Retry"| T_OUT
 ```
 
 ---
@@ -312,7 +358,7 @@ If the database transaction rolls back, **neither** record is saved, and `HTTP 2
 ```http
 POST /v1/events
 Content-Type: application/json
-X-Api-Key: rl_live_pk_dev001_7f3a9e2b4c810d9e8f1234567890abcdef1234567890abcdef1234567890abcdef
+X-Api-Key: <your-api-key>
 Idempotency-Key: idem_order_1001
 
 {
@@ -401,10 +447,7 @@ X-Api-Key: rl_live_pk_dev001_...
 ./scripts/run-frontend.sh
 ```
 
-Open `http://localhost:5173` in your browser. The default development key is:
-```text
-rl_live_pk_dev001_7f3a9e2b4c810d9e8f1234567890abcdef1234567890abcdef1234567890abcdef
-```
+Open `http://localhost:5173` in your browser. When the API starts up in Development environment, it seeds an active development tenant and outputs the generated API key to the console log.
 
 ---
 
@@ -414,13 +457,14 @@ rl_live_pk_dev001_7f3a9e2b4c810d9e8f1234567890abcdef1234567890abcdef1234567890ab
 ```bash
 dotnet test tests/Relay.UnitTests/Relay.UnitTests.csproj
 ```
-Results: **39 Passed / 39 Total (100%)**
+Results: **74 Passed / 74 Total (100%)**
 
 ### Run Integration Tests
 ```bash
-# Requires SQL Server running on port 1433
+# Requires SQL Server running on port 1433 and Azure Service Bus Emulator on port 5672
 dotnet test tests/Relay.IntegrationTests/Relay.IntegrationTests.csproj
 ```
+Results: **34 Passed / 34 Total (100%)**
 
 ### Run Frontend Typecheck & Build
 ```bash
@@ -431,7 +475,154 @@ npm run build
 
 ---
 
-## 15. Implementation Status & Roadmap
+## 15. Phase 2.1 — Reliability Verification
+
+### A. Broker Integration Status
+The asynchronous publishing pipeline has been verified with genuine end-to-end integration tests using the official **Azure Service Bus Emulator** container (`mcr.microsoft.com/azure-messaging/servicebus-emulator:latest`) paired with SQL Server 2022 on Linux/Podman:
+- **Queue Verified**: `relay-events`
+- **RequiresDuplicateDetection**: `true`
+- **DuplicateDetectionHistoryTimeWindow**: `PT5M` (5 minutes)
+- **Send and Receive Verified**: Outbox records were claimed, published via the official `Azure.Messaging.ServiceBus` SDK, retrieved with a receiver client, and verified to have preserved unescaped native JSON payload structures.
+- **Broker Deduplication Verified**: Sending two identical `MessageId` messages within the 5-minute detection window resulted in the emulator suppressing the duplicate message, delivering exactly 1 message to the receiver.
+
+### B. How to Configure and Run Broker Tests
+1. **Local Emulator (Container)**:
+   ```bash
+   podman run -d --name relay-servicebus-emulator --network host \
+     -e ACCEPT_EULA=Y \
+     -e SQL_SERVER=127.0.0.1 \
+     -e MSSQL_SA_PASSWORD='Your_Strong_Password123!' \
+     -v ./emulator/Config.json:/ServiceBus_Emulator/ConfigFiles/Config.json:Z \
+     mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+   ```
+2. **Optional Real Azure Namespace**:
+   Export your Azure Service Bus connection string or managed identity namespace:
+   ```bash
+   export RELAY_SERVICEBUS_CONNECTION_STRING="Endpoint=sb://<your-namespace>.servicebus.windows.net/;..."
+   dotnet test tests/Relay.IntegrationTests/Relay.IntegrationTests.csproj --filter "FullyQualifiedName~AzureServiceBusBrokerIntegrationTests"
+   ```
+
+### C. Simulation vs Production Publisher Safety
+The diagnostic logging publisher (`SimulationDiagnosticPublisher`) is quarantined for development only. It requires explicit opt-in (`ServiceBus:AllowSimulationPublisher=true`) in the `Development` environment. In production, startup immediately throws an `InvalidOperationException` if valid Azure Service Bus credentials or fully qualified namespace are not configured, preventing silent data loss or fake deliveries.
+
+### D. System Guarantees & Known Boundaries
+- **Guaranteed**: At-least-once durable event acceptance into SQL Server. Valid events committed to SQL Server will never be dropped by broker outages.
+- **Guaranteed**: Clean non-blocking concurrent batch claiming across horizontal worker replicas via `UPDLOCK, READPAST, ROWLOCK, READCOMMITTEDLOCK`.
+- **Guaranteed**: Optimistic fencing via unique `LeaseToken` preventing stale workers from overwriting active claims after lease expiration.
+- **Guaranteed**: Distinct `ClaimCount` (lease acquisitions) and `PublishAttemptCount` (actual network dispatch attempts).
+- **Not Guaranteed**: Eternal broker-side deduplication. Azure Service Bus duplicate detection only applies within the configured detection window (e.g. 5 minutes up to 7 days).
+- **Not Guaranteed**: Exactly-once delivery to arbitrary external HTTP webhooks. Relay guarantees at-least-once delivery; downstream consumers must be idempotent.
+
+---
+
+## 16. Phase 3 — Webhook Delivery Engine, HMAC Signing & SSRF Defense
+
+Phase 3 transitions Relay from an event publishing engine into an enterprise webhook delivery infrastructure platform:
+
+### A. Webhook Endpoint Management & Signing Secrets
+- **Endpoints API**: `POST /v1/endpoints`, `GET /v1/endpoints`, `GET /v1/endpoints/{id}`, `PUT /v1/endpoints/{id}`, `DELETE /v1/endpoints/{id}`.
+- **Tenant Isolation**: Every endpoint query is strictly scoped to the authenticated tenant. Cross-tenant access returns 404.
+- **One-Time Secret Exposure**: A cryptographically random signing secret (`whsec_<hex>`) is returned exactly once during endpoint creation.
+- **Secret Encryption at Rest**: Secrets are encrypted at rest using AES-256 via ASP.NET Core Data Protection (`IDataProtectionProvider`), pinned to `Relay.Platform`.
+
+### B. Durable Event Fan-Out
+- Background Service Bus consumer (`EventFanoutConsumer`) receives events under `PeekLock` semantics.
+- Matches active tenant subscriptions using normalized `WebhookEndpointSubscription` queries.
+- Idempotency is guaranteed by `WebhookEventFanout` (unique on `EventId`) and `WebhookDelivery` (unique on `EventId, EndpointId`).
+- Settles broker messages (`CompleteMessageAsync`) only after the fan-out transaction commits.
+
+### C. Webhook Delivery Dispatcher
+- Background delivery service (`WebhookDeliveryDispatcher`) claims pending deliveries using lease-based atomic CTE queries (`UPDLOCK, READPAST, ROWLOCK`).
+- Constructs a canonical JSON delivery envelope:
+  ```json
+  {
+    "schemaVersion": 1,
+    "eventId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "eventType": "invoice.paid",
+    "occurredAtUtc": "2026-11-17T03:00:00Z",
+    "payload": { "invoiceId": "INV-101", "amount": 500 }
+  }
+  ```
+- Computes canonical HMAC-SHA256 signature and includes standard headers:
+  - `X-Relay-Event-Id`: GUID of the event
+  - `X-Relay-Delivery-Id`: GUID of the delivery
+  - `X-Relay-Attempt`: Attempt counter (1-based)
+  - `X-Relay-Timestamp`: Unix epoch timestamp in seconds
+  - `X-Relay-Signature`: `t=<timestamp>,v1=<hex_hmac_sha256>`
+- Records status (`Delivered`, `Failed`, `Skipped`) and appends immutable `WebhookDeliveryAttempt` audit records with latency and response excerpts.
+
+### D. Multi-Layer SSRF Protection
+- **Registration Validation**: Blocks loopback (`127.0.0.0/8`, `::1`), private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local/cloud metadata (`169.254.169.254`), and IPv6-mapped IPv4.
+- **DNS Rebinding Defense (TOCTOU)**: Custom `SocketsHttpHandler.ConnectCallback` validates resolved IPs immediately prior to socket creation and pins the TCP socket to the validated IP.
+- **Hardened HTTP Client**: Automatic redirects disabled (`AllowAutoRedirect = false`), 10-second timeout, and 4 KB response read limits.
+
+---
+
+## 17. Phase 4 — Intelligent Retry Engine, Dead-Letter Recovery & Resilience
+
+Phase 4 elevates Relay's webhook delivery system into an enterprise resilience platform capable of self-healing, rate-limit adherence, failure isolation, and manual operational recovery:
+
+### A. Failure Classification & Durable Full Jitter Retry Engine
+- **Failure Classification (`IWebhookDeliveryFailureClassifier`)**:
+  - Distinguishes permanent failures (`400-422`, `3xx`, SSRF blocks, TLS cert errors) from transient failures (`408`, `425`, `429`, `5xx`, socket resets/timeouts).
+  - Permanent client errors fail fast (`Status = Failed`) without wasting retry attempts or worker resources.
+- **Durable Full Jitter Exponential Backoff (`IWebhookRetryPolicy`)**:
+  - `ExponentialCap = min(MaxDelaySeconds, BaseDelaySeconds * 2^(attempt - 1))`.
+  - `Delay = UniformRandom(0, ExponentialCap)`. Full Jitter ensures uniform distribution across time, preventing synchronized thundering herd spikes.
+  - Retries are scheduled durably in SQL Server via `NextAttemptAtUtc`—never in-memory `Task.Delay`.
+- **24-Hour Bounded Window**: Retries are rejected and dead-lettered if `NextAttemptAtUtc > CreatedAtUtc + MaxRetryWindowHours` (default 24h).
+- **Strict Separation of Claim vs Attempt**: Claiming records increments `ClaimCount`; `AttemptCount` is strictly incremented only upon actual outbound HTTP dispatch.
+
+### B. Standards-Compliant `Retry-After` Handling
+- **RFC 7231 / RFC 9110 Support (`IRetryAfterParser`)**:
+  - Parses delta-seconds (`Retry-After: 120`) and RFC1123 HTTP-date (`Retry-After: Wed, 21 Oct 2026 07:28:00 GMT`).
+  - Strict UTC timestamp conversion and clamping against `MaxServerRequestedDelaySeconds` (default 86,400s / 24h).
+  - Guarantees Relay never retries earlier than the server requested: `Delay = max(CalculatedJitterDelay, ServerRequestedDelay)`.
+  - Distinguishes cooperative rate limits (`429`) from service crashes (`500/503`): `429` does not trip circuit breakers.
+
+### C. Dead-Letter Management & Manual Replay API
+- **Dead-Letter State (`WebhookDeliveryStatus.DeadLettered`)**:
+  - Deliveries reaching max attempts (default 8), exceeding the 24-hour window, or receiving excessive server delay requests are quarantined into `DeadLettered` status.
+  - Automatically skipped by background dispatcher queries to prevent queue clogging.
+- **Manual Replay API (`POST /v1/deliveries/{deliveryId}/replay`)**:
+  - Tenant-authorized endpoint allowing replay of `DeadLettered` or `Failed` deliveries.
+  - Validates that the target endpoint is active before replaying.
+  - Optional `Idempotency-Key` header prevents duplicate replays.
+  - Inserts durable audit log (`WebhookDeliveryReplayAudit`) with `TenantId`, `ReplayKey`, `RequestedBy`, `PreviousStatus`, and `ReplayedAtUtc`.
+  - Resets delivery status to `Pending` and increments `ReplayCount` while **strictly preserving** the stable `DeliveryId` and entire historical attempt timeline.
+
+### D. Endpoint-Level Circuit Breakers & Concurrency Bulkheads
+- **Shared SQL Server Circuit Breakers (`IEndpointCircuitBreakerManager`)**:
+  - Tracks state directly on `WebhookEndpoint` in SQL Server: `Closed`, `Open`, `HalfOpen`.
+  - Trips to `Open` when consecutive failures reach `FailureThreshold` (default 5).
+  - Transitions to `HalfOpen` after `OpenDurationSeconds` (default 60s).
+  - Enforces a **single half-open probe** (`TryAcquireHalfOpenProbe`), preventing thundering herds from overwhelming recovering endpoints.
+  - **Zero Budget Penalty**: Deferred deliveries remain `Pending` and do not consume tenant retry attempts.
+- **Dual-Level Concurrency Bulkheads (`IBulkheadManager`)**:
+  - **Global Worker Concurrency**: Limits total outbound HTTP connections (default 20) across all endpoints.
+  - **Per-Endpoint Concurrency**: Limits concurrent connections to any single endpoint (default 5).
+  - Prevents slow/unresponsive endpoints from monopolizing worker threads or starving healthy endpoints.
+
+### E. Delivery State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : Fanout from Event
+    Pending --> Processing : Claimed by Worker Lease
+    Processing --> Delivered : HTTP 2xx (Success)
+    Processing --> Failed : Permanent Client Error (400-422, SSRF, TLS)
+    Processing --> Skipped : Endpoint Deactivated / Deleted
+    Processing --> Pending : Retryable Failure (408/429/5xx) & Budget Remaining\n(NextAttemptAtUtc = Now + Jitter/Retry-After)
+    Processing --> DeadLettered : Retry Budget Exhausted (Attempt >= MaxAttempts) OR 24h Window Expired
+    Processing --> Pending : Circuit Breaker Open (Deferred without consuming attempt)
+    DeadLettered --> Pending : POST /v1/deliveries/{id}/replay (ReplayCount++)
+    Failed --> Pending : POST /v1/deliveries/{id}/replay (ReplayCount++)
+    Delivered --> [*]
+```
+
+---
+
+## 18. Implementation Status & Roadmap
 
 | Feature / Component | Status | Target Phase |
 | :--- | :--- | :--- |
@@ -444,17 +635,87 @@ npm run build
 | Tenant-Scoped Retrieval & Listing (`GET /v1/events`) | **Implemented & Tested** | Phase 1 |
 | Health Endpoints (`/health/live`, `/health/ready`) | **Implemented & Tested** | Phase 1 |
 | React 19 + TypeScript Developer Console | **Implemented & Tested** | Phase 1 |
-| Automated Unit & Integration Test Suites | **Implemented & Tested** | Phase 1 |
 | GitHub Actions CI Workflow | **Implemented** | Phase 1 |
-| Outbox Dispatcher & Azure Service Bus Publisher | *Planned* | Phase 2 |
-| Webhook HTTP Delivery Engine with HMAC-SHA256 Signatures | *Planned* | Phase 3 |
-| Exponential Backoff Retries, Jitter & Dead-Letter Queue | *Planned* | Phase 4 |
-| SSRF Protection & Per-Endpoint Circuit Breakers | *Planned* | Phase 5 |
-| Azure Infrastructure Deployment (Bicep + Container Apps) | *Planned* | Phase 6 |
-| OpenTelemetry Distributed Tracing & Live Dashboard | *Planned* | Phase 7 |
+| Outbox Dispatcher with Lease-Based Atomic Claiming | **Implemented & Tested** | Phase 2 |
+| Azure Service Bus Publisher & Envelope Serialization | **Implemented & Tested** | Phase 2 |
+| Full Jitter Exponential Backoff & Transient Retry Logic | **Implemented & Tested** | Phase 2 |
+| Real Azure Service Bus Emulator Verification & Deduplication | **Implemented & Tested** | Phase 2.1 |
+| ClaimCount vs PublishAttemptCount Separation | **Implemented & Tested** | Phase 2.1 |
+| RCSI & READCOMMITTEDLOCK Concurrency Hardening | **Implemented & Tested** | Phase 2.1 |
+| Multi-Tenant Webhook Endpoint Registration & Subscriptions | **Implemented & Tested** | Phase 3 |
+| One-Time Signing Secret Generation & Data Protection at Rest | **Implemented & Tested** | Phase 3 |
+| Durable Event Fan-Out Consumer with DB Idempotency | **Implemented & Tested** | Phase 3 |
+| Webhook Delivery Dispatcher with Lease Claiming & HMAC Signing | **Implemented & Tested** | Phase 3 |
+| Comprehensive SSRF Defense & DNS Rebinding Socket Pinning | **Implemented & Tested** | Phase 3 |
+| Delivery History Inspection API (`GET /v1/deliveries`) | **Implemented & Tested** | Phase 3 |
+| React Dashboard Endpoints & Deliveries Management Views | **Implemented & Tested** | Phase 3 |
+| Full Jitter Exponential Webhook Retry Policy (24h Window) | **Implemented & Tested** | Phase 4 |
+| Standards-Compliant `Retry-After` Header Parsing | **Implemented & Tested** | Phase 4 |
+| Dead-Letter Queue & Isolation (`DeadLettered` Status) | **Implemented & Tested** | Phase 4 |
+| Manual Replay API (`POST /v1/deliveries/{id}/replay`) & Auditing | **Implemented & Tested** | Phase 4 |
+| Shared SQL-Backed Circuit Breakers (Closed/Open/HalfOpen) | **Implemented & Tested** | Phase 4 |
+| Dual-Level Concurrency Bulkheads (Global & Per-Endpoint) | **Implemented & Tested** | Phase 4 |
+| Dashboard Dead-Letter Filtering, Timeline & Replay UI | **Implemented & Tested** | Phase 4 |
+| Bulkhead Inverted Admission Control & Semaphore Sweeping | **Implemented & Tested** | Phase 4.1 |
+| Circuit Breaker Probe Leases & Crash Recovery | **Implemented & Tested** | Phase 4.1 |
+| Replay Retry-Cycle Isolation & Scoped Idempotency | **Implemented & Tested** | Phase 4.1 |
+| Azure Infrastructure Deployment (Bicep + ACA) | **Stage A Ready** (IaC, Docker, CI/CD, Admin CLI) | Phase 5 |
+| Dedicated Migration & Tenant Management CLI (`relay-admin`) | **Implemented & Tested** | Phase 5 |
+| OpenTelemetry Distributed Tracing & Azure Monitor | **Implemented & Configured** | Phase 5 |
+| Azure Blob Storage & Key Vault Data Protection Ring | **Implemented & Integrated** | Phase 5 |
+| Azure Cloud Live Deployment Execution | *Pending User Approval (Stage B)* | Phase 5 |
+| Azure Blob Claim Check for Large Payloads (>32KB) | *Planned* | Phase 6 |
 
 ---
 
-## 16. License
+## 19. Architecture Decision Records (ADRs)
+
+| ADR | Title | Status | Date |
+| :--- | :--- | :--- | :--- |
+| [0001](docs/adr/0001-project-architecture.md) | Project Architecture & Modular Monolith Design | Accepted | 2026-11-17 |
+| [0002](docs/adr/0002-database-choice.md) | Database Choice: SQL Server / Azure SQL Database | Accepted | 2026-11-17 |
+| [0003](docs/adr/0003-api-key-authentication.md) | API-Key Authentication & Constant-Time Hashing | Accepted | 2026-11-17 |
+| [0004](docs/adr/0004-transactional-outbox.md) | Atomic Transactional Outbox Pattern | Accepted | 2026-11-17 |
+| [0005](docs/adr/0005-react-frontend.md) | React 19 Frontend Developer Console | Accepted | 2026-11-17 |
+| [0006](docs/adr/0006-outbox-dispatcher-and-lease-based-claiming.md) | Outbox Dispatcher and Lease-Based Claiming | Accepted | 2026-11-17 |
+| [0007](docs/adr/0007-azure-service-bus-integration.md) | Azure Service Bus Integration & Message Envelope | Accepted | 2026-11-17 |
+| [0008](docs/adr/0008-webhook-endpoint-management-and-subscription-model.md) | Webhook Endpoint Management & Subscription Model | Accepted | 2026-11-17 |
+| [0009](docs/adr/0009-durable-event-fan-out-and-consumer-idempotency.md) | Durable Event Fan-Out & Consumer Idempotency | Accepted | 2026-11-17 |
+| [0010](docs/adr/0010-webhook-signing-and-endpoint-secret-protection.md) | Webhook HMAC-SHA256 Signing & Secret Protection | Accepted | 2026-11-17 |
+| [0011](docs/adr/0011-ssrf-protection-and-secure-outbound-http.md) | Multi-Layer SSRF Defense & Socket Pinning | Accepted | 2026-11-17 |
+| [0012](docs/adr/0012-durable-webhook-retry-policy-and-http-failure-classification.md) | Durable Retry Policy & HTTP Failure Classification | Accepted | 2026-11-17 |
+| [0013](docs/adr/0013-retry-after-handling-and-server-directed-retry-scheduling.md) | Retry-After Handling & Server-Directed Scheduling | Accepted | 2026-11-17 |
+| [0014](docs/adr/0014-delivery-dead-letter-management-and-manual-replay.md) | Webhook Delivery Dead-Letter Management & Replay | Accepted | 2026-11-17 |
+| [0015](docs/adr/0015-endpoint-level-circuit-breakers-and-concurrency-bulkheads.md) | Endpoint Circuit Breakers & Concurrency Bulkheads | Accepted | 2026-11-17 |
+| [0016](docs/adr/0016-bulkhead-admission-control-and-noisy-neighbor-prevention.md) | Bulkhead Admission Control & Noisy-Neighbor Prevention | Accepted | 2026-11-17 |
+| [0017](docs/adr/0017-circuit-breaker-probe-leases-and-crash-recovery.md) | Circuit Breaker Probe Leases & Crash Recovery | Accepted | 2026-11-17 |
+| [0018](docs/adr/0018-manual-replay-retry-cycle-semantics.md) | Manual Replay Retry-Cycle Semantics & Idempotency Scope | Accepted | 2026-11-17 |
+| [0019](docs/adr/0019-azure-container-apps-hosting.md) | Azure Container Apps for API and Worker Hosting | Accepted | 2026-11-17 |
+| [0020](docs/adr/0020-managed-identity-and-passwordless-access.md) | Managed Identity & Passwordless Access | Accepted | 2026-11-17 |
+| [0021](docs/adr/0021-azure-data-protection-key-storage.md) | Distributed ASP.NET Core Data Protection Key Ring | Accepted | 2026-11-17 |
+| [0022](docs/adr/0022-azure-networking-and-egress.md) | Azure Networking, Ingress, and Outbound Egress | Accepted | 2026-11-17 |
+| [0023](docs/adr/0023-observability-and-distributed-tracing.md) | Observability, Distributed Tracing & Azure Monitor | Accepted | 2026-11-17 |
+| [0024](docs/adr/0024-database-migration-deployment-strategy.md) | Database Migration & Operational Tooling Strategy | Accepted | 2026-11-17 |
+
+---
+
+## 20. Automated Test Suite Metrics
+
+```text
+========================================================================================
+Test Suite               Passed    Failed    Skipped    Duration
+========================================================================================
+Relay.UnitTests             137         0          0    ~120 ms
+Relay.IntegrationTests       45         0          0    ~6.5 s
+React Frontend (Lint)      Pass         0          0    ~1.8 s
+React Frontend (Build)     Pass         0          0    ~1.2 s
+----------------------------------------------------------------------------------------
+Total Automated Tests       182         0          0    Fully Verified
+========================================================================================
+```
+
+---
+
+## 21. License
 
 This project is licensed under the MIT License.

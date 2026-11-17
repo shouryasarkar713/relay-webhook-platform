@@ -83,12 +83,17 @@ public sealed class DomainEntityTests
             now);
 
         msg.Status.Should().Be(OutboxStatus.Pending);
-        msg.AttemptCount.Should().Be(0);
+        msg.ClaimCount.Should().Be(0);
+        msg.PublishAttemptCount.Should().Be(0);
 
         // Act
-        msg.RecordFailure("Network timeout connecting to broker");
+        var lease = Guid.NewGuid();
+        msg.Claim(lease, now.AddMinutes(1), now);
+        msg.RecordPublishAttempt();
+        msg.MarkFailed("Network timeout connecting to broker", now, expectedLeaseToken: lease);
         msg.Status.Should().Be(OutboxStatus.Failed);
-        msg.AttemptCount.Should().Be(1);
+        msg.ClaimCount.Should().Be(1);
+        msg.PublishAttemptCount.Should().Be(1);
         msg.LastError.Should().Contain("timeout");
 
         var publishedAt = now.AddMinutes(5);

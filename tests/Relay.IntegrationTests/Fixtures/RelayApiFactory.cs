@@ -9,7 +9,7 @@ using Relay.Infrastructure;
 
 namespace Relay.IntegrationTests.Fixtures;
 
-public class RelayApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
+public class RelayApiFactory : WebApplicationFactory<Relay.Api.Program>, IAsyncLifetime
 {
     public const string TenantAId = "11111111-1111-1111-1111-111111111111";
     public const string TenantBId = "22222222-2222-2222-2222-222222222222";
@@ -44,7 +44,9 @@ public class RelayApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["ConnectionStrings:RelayDatabase"] = _connectionString
+                ["ConnectionStrings:RelayDatabase"] = _connectionString,
+                ["WebhookSecurity:RequireHttps"] = "false",
+                ["WebhookSecurity:AllowLoopbackForTesting"] = "true"
             });
         });
 
@@ -83,7 +85,12 @@ public class RelayApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         var now = timeProvider.GetUtcNow();
 
-        // Clear existing test data
+        // Clear existing test data in reverse foreign key order
+        await db.WebhookDeliveryAttempts.ExecuteDeleteAsync();
+        await db.WebhookDeliveries.ExecuteDeleteAsync();
+        await db.WebhookEventFanouts.ExecuteDeleteAsync();
+        await db.WebhookEndpointSubscriptions.ExecuteDeleteAsync();
+        await db.WebhookEndpoints.ExecuteDeleteAsync();
         await db.OutboxMessages.ExecuteDeleteAsync();
         await db.Events.ExecuteDeleteAsync();
         await db.ApiKeys.ExecuteDeleteAsync();

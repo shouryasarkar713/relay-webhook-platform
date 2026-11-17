@@ -21,6 +21,7 @@
     <ProjectReference Include="..\..\src\Relay.Application\Relay.Application.csproj" />
     <ProjectReference Include="..\..\src\Relay.Domain\Relay.Domain.csproj" />
     <ProjectReference Include="..\..\src\Relay.Infrastructure\Relay.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\Relay.Worker\Relay.Worker.csproj" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,16 @@
+**/.git
+**/.gitignore
+**/.vscode
+**/.idea
+**/bin
+**/obj
+**/TestResults
+**/node_modules
+**/dist
+**/build
+**/*.user
+**/*.suo
+*.md
+docs/
+deploy/
+frontend/

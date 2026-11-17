@@ -4,6 +4,8 @@ import { Header } from './components/Header';
 import { Overview } from './components/Overview';
 import { Playground } from './components/Playground';
 import { EventsView } from './components/EventsView';
+import { EndpointsView } from './components/EndpointsView';
+import { DeliveriesView } from './components/DeliveriesView';
 
 export const App: React.FC = () => {
   const [currentTab, setCurrentTab] = useState<NavTab>('overview');
@@ -42,6 +44,18 @@ export const App: React.FC = () => {
               apiKey={apiKey}
               setApiKey={setApiKey}
               selectedEventId={recentEventId}
+            />
+          )}
+          {currentTab === 'endpoints' && (
+            <EndpointsView
+              apiKey={apiKey}
+              setApiKey={setApiKey}
+            />
+          )}
+          {currentTab === 'deliveries' && (
+            <DeliveriesView
+              apiKey={apiKey}
+              setApiKey={setApiKey}
             />
           )}
         </main>

@@ -12,6 +12,12 @@ public sealed class RelayDbContext : DbContext, IRelayDbContext
     public DbSet<ApiKey> ApiKeys => Set<ApiKey>();
     public DbSet<Event> Events => Set<Event>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+    public DbSet<WebhookEndpoint> WebhookEndpoints => Set<WebhookEndpoint>();
+    public DbSet<WebhookEndpointSubscription> WebhookEndpointSubscriptions => Set<WebhookEndpointSubscription>();
+    public DbSet<WebhookEventFanout> WebhookEventFanouts => Set<WebhookEventFanout>();
+    public DbSet<WebhookDelivery> WebhookDeliveries => Set<WebhookDelivery>();
+    public DbSet<WebhookDeliveryAttempt> WebhookDeliveryAttempts => Set<WebhookDeliveryAttempt>();
+    public DbSet<WebhookDeliveryReplayAudit> WebhookDeliveryReplayAudits => Set<WebhookDeliveryReplayAudit>();
 
     public async Task<T> ExecuteInTransactionAsync<T>(
         Func<CancellationToken, Task<T>> operation,
