@@ -235,7 +235,7 @@ module migrationJob 'modules/migration-job.bicep' = {
 
 // Deployment Outputs
 output apiUrl string = containerApps.outputs.apiUrl
-output apiFqdn string = containerApps.outputs.apiFqdn
+output apiFqdn string = containerApps.outputs.apiAppFqdn
 output workerAppId string = containerApps.outputs.workerAppId
 output migrationJobName string = migrationJob.outputs.migrationJobName
 output sqlServerFqdn string = sqlDatabase.outputs.sqlServerFqdn

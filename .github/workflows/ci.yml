@@ -44,6 +44,15 @@ jobs:
       - name: Run Unit Tests
         run: dotnet test tests/Relay.UnitTests/Relay.UnitTests.csproj --configuration Release --no-build --logger "trx;LogFileName=unit-tests.trx"
 
+      - name: Start Azure Service Bus Emulator
+        run: |
+          docker run -d --name servicebus-emulator --network host             -e ACCEPT_EULA=Y             -e SQL_SERVER=127.0.0.1             -e MSSQL_SA_PASSWORD='Your_Strong_Password123!'             -v "${{ github.workspace }}/emulator/Config.json:/ServiceBus_Emulator/ConfigFiles/Config.json"             mcr.microsoft.com/azure-messaging/servicebus-emulator:latest
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/5672) 2>/dev/null; then echo "Service Bus emulator is listening on 5672"; exit 0; fi
+            sleep 3
+          done
+          echo "Service Bus emulator did not start in time"; docker logs servicebus-emulator || true; exit 1
+
       - name: Run Integration Tests
         env:
           RELAY_TEST_CONNECTION_STRING: "Server=localhost,1433;Database=RelayTestDb;User Id=sa;Password=Your_Strong_Password123!;TrustServerCertificate=True;MultipleActiveResultSets=True;"
@@ -83,13 +92,11 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Azure CLI & Bicep
-        uses: azure/setup-bicep@v2
-        with:
-          version: 'latest'
+      - name: Install Bicep (Azure CLI)
+        run: az bicep install
 
       - name: Validate Bicep Compilation
-        run: bicep build deploy/main.bicep
+        run: az bicep build --file deploy/main.bicep --stdout > /dev/null
 
       - name: Build API Docker Image
         run: docker build -f src/Relay.Api/Dockerfile -t relay-api:${{ github.sha }} .

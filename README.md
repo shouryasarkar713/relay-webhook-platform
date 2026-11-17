@@ -2,7 +2,7 @@
 
 **Enterprise-Grade Multi-Tenant Webhook Delivery and Event Management Platform**
 
-[![Backend CI (.NET 10 & SQL Server)](https://github.com/shouryasarkar/relay/actions/workflows/ci.yml/badge.svg)](https://github.com/shouryasarkar/relay/actions)
+[![Backend CI (.NET 10 & SQL Server)](https://github.com/shouryasarkar713/relay-webhook-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/shouryasarkar713/relay-webhook-platform/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![.NET 10 LTS](https://img.shields.io/badge/.NET-10.0%20LTS-purple.svg)](https://dotnet.microsoft.com/)
 [![React 19](https://img.shields.io/badge/React-19.0-61dafb.svg)](https://react.dev/)
@@ -213,8 +213,8 @@ Relay/
 │       └── package.json
 │
 ├── tests/
-│   ├── Relay.UnitTests/                # 39 focused unit tests (Validation, Hashing, Entities)
-│   └── Relay.IntegrationTests/         # 13 integration tests (WebApplicationFactory + SQL Server)
+│   ├── Relay.UnitTests/                # 137 unit tests (xUnit + FluentAssertions)
+│   └── Relay.IntegrationTests/         # 45 integration tests (WebApplicationFactory, SQL Server, Service Bus emulator)
 │
 ├── docs/
 │   ├── architecture/                   # System overview & architectural summaries
@@ -457,14 +457,18 @@ Open `http://localhost:5173` in your browser. When the API starts up in Developm
 ```bash
 dotnet test tests/Relay.UnitTests/Relay.UnitTests.csproj
 ```
-Results: **74 Passed / 74 Total (100%)**
+Results: **137 Passed / 137 Total (100%)**
 
 ### Run Integration Tests
 ```bash
 # Requires SQL Server running on port 1433 and Azure Service Bus Emulator on port 5672
 dotnet test tests/Relay.IntegrationTests/Relay.IntegrationTests.csproj
 ```
-Results: **34 Passed / 34 Total (100%)**
+Results: **45 Passed / 45 Total (100%)**
+
+CI (`.github/workflows/ci.yml`) starts SQL Server and the official Azure Service Bus emulator, so the broker tests run against a real broker on every push and pull request.
+
+> **Concurrent claiming:** the outbox claim query uses `UPDLOCK, READPAST` with `TOP (N) ... ORDER BY`. A racing worker may receive fewer than N rows (even none) while another worker holds locks, and picks the rest up on its next poll. The integration test asserts the invariant that matters: no record is ever claimed twice, and every record is eventually claimed exactly once.
 
 ### Run Frontend Typecheck & Build
 ```bash
