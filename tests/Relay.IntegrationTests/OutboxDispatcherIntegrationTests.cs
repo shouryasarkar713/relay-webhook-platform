@@ -96,9 +96,11 @@ public sealed class OutboxDispatcherIntegrationTests : IAsyncLifetime
         var batch1 = results[0];
         var batch2 = results[1];
 
-        // Assert: both batches must have claimed 10 non-overlapping records
-        batch1.Count.Should().Be(10);
-        batch2.Count.Should().Be(10);
+        // Assert: the safety invariant. Under READPAST a worker skips rows another worker holds locked, and SQL Server
+        // may lock every row it scans for a TOP (N) ... ORDER BY plan, so a racing worker can legitimately receive
+        // fewer than N rows (even zero). What must never happen is the same record being claimed twice.
+        batch1.Count.Should().BeInRange(0, 10);
+        batch2.Count.Should().BeInRange(0, 10);
 
         var batch1Ids = batch1.Select(m => m.Id).ToHashSet();
         var batch2Ids = batch2.Select(m => m.Id).ToHashSet();
@@ -106,6 +108,17 @@ public sealed class OutboxDispatcherIntegrationTests : IAsyncLifetime
         batch1Ids.Overlaps(batch2Ids).Should().BeFalse("Concurrent workers using UPDLOCK/READPAST must never claim overlapping records");
         batch1.Should().OnlyContain(m => m.LeaseToken == lease1);
         batch2.Should().OnlyContain(m => m.LeaseToken == lease2);
+
+        // Liveness: once the race is over, the two workers can drain the rest, and every message is claimed exactly once.
+        var claimedIds = batch1Ids.Concat(batch2Ids).ToList();
+        for (var attempt = 0; attempt < 5 && claimedIds.Count < 20; attempt++)
+        {
+            var more = await store1.ClaimBatchAsync(10, lease1, leaseDuration);
+            claimedIds.AddRange(more.Select(m => m.Id));
+        }
+
+        claimedIds.Should().HaveCount(20);
+        claimedIds.Distinct().Should().HaveCount(20, "every outbox message must be claimed exactly once");
     }
 
     [Fact]
